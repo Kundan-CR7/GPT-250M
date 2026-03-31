@@ -1,21 +1,10 @@
-class Config:
-    #model architecture
-    vocab_size = 50000
-    block_size = 512
+from dataclasses import dataclass
 
-    n_layer = 24
-    n_head = 16
-    n_embd = 1024
-
-    #training parameters
-    batch_size = 32
-    learning_rate = 3e-4
-    max_iters = 200000
-
-    #device
-    device = "cuda"
-
-    #evaluation
-    eval_interval = 500
-
-
+@dataclass
+class GPTConfig:
+    block_size: int = 512      
+    vocab_size: int = 50257      
+    n_layer: int = 16            
+    n_head: int = 16             
+    n_embd: int = 1024          
+    dropout: float = 0.1        
