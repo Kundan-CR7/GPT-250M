@@ -23,7 +23,7 @@ class GPTEmbedding(nn.Module):
         x = tok_emb + pos_emb   #(B,T,C) broadcasts works here
         return self.drop(x)
     
-class CasualSelfAttention(nn.Module):
+class CausalSelfAttention(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0
@@ -73,12 +73,26 @@ class CasualSelfAttention(nn.Module):
         #Final output projection
         y = self.resid_dropout(self.c_proj(y))
 
+class FeedForward(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
 
+        self.c_fc = nn.Linear(config.n_embd, 4*config.n_embd)
 
+        #Gaussian Error Linear Unit (GELU) activation
+        self.gelu = nn.GELU()
 
+        #Project back down to the original dimension
+        self.c_proj = nn.Linear(4*config.n_embd, config.n_embd)
 
+        #Dropout 
+        self.dropout = nn.Dropout(config.dropout)
 
+    def forward(self, x):
 
+        x = self.c_fc(x)    #(B,T,4*C)
+        x = self.gelu(x)    #(B,T,4*C)
+        x = self.c_proj(x)  #(B,T,C)
+        x = self.dro(x)     #(B,T,C)
 
-
-
+        return x
