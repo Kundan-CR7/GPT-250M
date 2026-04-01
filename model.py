@@ -96,3 +96,30 @@ class FeedForward(nn.Module):
         x = self.dro(x)     #(B,T,C)
 
         return x
+    
+class Block(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+
+        #First LayerNorm (before Attention)
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+
+        #The communication phase
+        self.attn = CausalSelfAttention(config=config)
+
+        #Second LayerNorm (before MLP)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+
+        #The computation phase
+        self.mlp = FeedForward(config=config)
+
+    def forward(self, x):
+
+        # Normalize -> Attend -> Add residual
+        x = x + self.attn(self.ln_1(x))
+
+        # Normalize -> FeedForward -> Add residual
+        x = x + self.mlp(self.ln_2(x))
+
+        return x
+    
