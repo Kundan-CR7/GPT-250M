@@ -10,7 +10,7 @@ class GPTEmbedding(nn.Module):
 
         self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
 
-        self.position_embedding = nn.Embedding(config.vocab_size, config.n_embd)
+        self.position_embedding = nn.Embedding(config.block_size, config.n_embd)
 
         self.drop = nn.Dropout(config.dropout)
 
@@ -123,3 +123,52 @@ class Block(nn.Module):
 
         return x
     
+class GPT(nn.Module):
+    def __init__(self, config:GPTConfig):
+        super().__init__()
+        self.config = config
+
+        self.embeddings = GPTEmbedding(config)
+
+        #The stakck of 16 Transformer Blocks
+        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+
+        #Final Layer Normalization
+        self.ln_f = nn.LayerNorm(config.n_embd)
+
+        #The language Modeling Head
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        #Weight Tying 
+        self.embeddings.token_embedding.weight = self.lm_head.weight
+
+        #Initialize all weights
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if(isinstance(module, nn.Linear)):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if(module.bias is not None):
+                torch.nn.init.zeros_(module.bias)
+        elif(isinstance(module, nn.Embedding)):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+    
+    def forward(self,idx):
+        #idx shape: (B,T)
+        
+        #Pass through Embeddings layer
+        x = self.embeddings(idx)   #(B,T,C)
+
+        #Pass sequentially through all 16 Transformer Blocks
+        for block in self.blocks:
+            x = block(x)
+        
+        #Final normalization
+        x = self.ln_f(x)
+
+        #Calculate final vocabulary scores
+        logits = self.lm_head(x)   #(B,T,vocab_size)
+
+        return logits
+
+
