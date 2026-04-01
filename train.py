@@ -3,6 +3,7 @@ import time
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import tiktoken
 
 # Import our custom modules
 from config import GPTConfig
@@ -74,6 +75,38 @@ else:
     print("No checkpoint found in Drive. Starting training from scratch!")
 
 # ==========================================
+# 4.5 Evaluation Sampling Function
+# ==========================================
+def generate_sample(model, device, prompt="The ", max_new_tokens=30):
+    # Switch to evaluation mode (turns off dropout)
+    model.eval()
+    
+    enc = tiktoken.get_encoding("gpt2")
+    tokens = enc.encode(prompt)
+    x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+    
+    print("\n--- 🧠 Model Brain Check ---")
+    print(f"Prompt: '{prompt}'")
+    
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            x_cond = x[:, -config.block_size:]
+            logits = model(x_cond)
+            logits = logits[:, -1, :] 
+            
+            # Use a slightly lower temperature during training to see the most likely words
+            probs = F.softmax(logits / 0.8, dim=-1) 
+            next_token = torch.multinomial(probs, num_samples=1)
+            x = torch.cat((x, next_token), dim=1)
+            
+    output_text = enc.decode(x[0].tolist())
+    print(f"Output: {output_text}")
+    print("----------------------------\n")
+    
+    # CRITICAL: Switch back to training mode so dropout turns back on!
+    model.train()
+
+# ==========================================
 # 5. The Training Loop
 # ==========================================
 model.train()
@@ -113,7 +146,7 @@ for step in range(start_step, max_steps):
     if step % 10 == 0 and step > 0:
         t1 = time.time()
         dt = t1 - t0
-        tokens_processed = 10 * gradient_accumulation_steps * micro_batch_size * config.block_size
+        tokens_processed = 10 * micro_batch_size * config.block_size
         print(f"Step {step:5d} | Loss: {real_loss:.4f} | Speed: {(tokens_processed / dt):.2f} tok/sec")
         t0 = time.time() 
 
@@ -131,6 +164,10 @@ for step in range(start_step, max_steps):
             print(f"🌟 Saved best_model.pth to Drive! (Loss: {best_loss:.4f})")
 
         if step % save_interval == 0 and step > 0:
-            torch.save(checkpoint, os.path.join(drive_path, f"gpt_step_{step}.pth"))
+            backup_file = os.path.join(drive_path, f"gpt250m_step_{step}.pth")
+            torch.save(checkpoint, backup_file)
+
+            # Generate a sample right after saving the backup
+            generate_sample(model, device, prompt="Once upon a time", max_new_tokens=30)
 
 print("Training run completed!")
