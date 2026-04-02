@@ -72,6 +72,8 @@ class CausalSelfAttention(nn.Module):
 
         #Final output projection
         y = self.resid_dropout(self.c_proj(y))
+        
+        return y
 
 class FeedForward(nn.Module):
     def __init__(self, config: GPTConfig):
