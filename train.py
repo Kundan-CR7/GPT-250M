@@ -163,11 +163,7 @@ for step in range(start_step, max_steps):
             torch.save(checkpoint, checkpoint_path)
             print(f"🌟 Saved best_model.pth to Drive! (Loss: {best_loss:.4f})")
 
-        if (step+1) % save_interval == 0 and step > 0:
-            backup_file = os.path.join(drive_path, f"gpt250m_step_{step}.pth")
-            torch.save(checkpoint, backup_file)
-
-            # Generate a sample right after saving the backup
+            # Generate a sample right after saving the best model
             generate_sample(model, device, prompt="Once upon a time", max_new_tokens=30)
 
 print("Training run completed!")
