@@ -39,7 +39,7 @@ model.to(device)
 # ==========================================
 # 3. Optimization Setup
 # ==========================================
-micro_batch_size = 4
+micro_batch_size = 2
 gradient_accumulation_steps = batch_size // micro_batch_size
 
 scaler = torch.amp.GradScaler('cuda')

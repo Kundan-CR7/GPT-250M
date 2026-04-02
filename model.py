@@ -72,7 +72,7 @@ class CausalSelfAttention(nn.Module):
 
         #Final output projection
         y = self.resid_dropout(self.c_proj(y))
-        
+
         return y
 
 class FeedForward(nn.Module):
@@ -95,7 +95,7 @@ class FeedForward(nn.Module):
         x = self.c_fc(x)    #(B,T,4*C)
         x = self.gelu(x)    #(B,T,4*C)
         x = self.c_proj(x)  #(B,T,C)
-        x = self.dro(x)     #(B,T,C)
+        x = self.dropout(x)     #(B,T,C)
 
         return x
     
