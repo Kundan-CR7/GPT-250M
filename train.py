@@ -14,7 +14,7 @@ from model import GPT
 # 1. Configuration and Data Pipeline
 # ==========================================
 config = GPTConfig()
-target_batch_size = 16  
+target_batch_size = 32
 micro_batch_size = 4
 
 print("Initializing dataset...")
