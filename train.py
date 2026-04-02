@@ -14,14 +14,15 @@ from model import GPT
 # 1. Configuration and Data Pipeline
 # ==========================================
 config = GPTConfig()
-batch_size = 16  
+target_batch_size = 16  
+micro_batch_size = 2
 
 print("Initializing dataset...")
 train_dataset = GPTDataset(data_path="train.bin", block_size=config.block_size)
 
 train_loader = DataLoader(
     train_dataset,
-    batch_size=batch_size,
+    batch_size=micro_batch_size,
     shuffle=True,
     pin_memory=True,
     num_workers=2
@@ -39,8 +40,7 @@ model.to(device)
 # ==========================================
 # 3. Optimization Setup
 # ==========================================
-micro_batch_size = 2
-gradient_accumulation_steps = batch_size // micro_batch_size
+gradient_accumulation_steps = target_batch_size // micro_batch_size
 
 scaler = torch.amp.GradScaler('cuda')
 learning_rate = 3e-4
