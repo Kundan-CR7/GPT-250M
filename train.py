@@ -15,7 +15,7 @@ from model import GPT
 # ==========================================
 config = GPTConfig()
 target_batch_size = 16  
-micro_batch_size = 2
+micro_batch_size = 4
 
 print("Initializing dataset...")
 train_dataset = GPTDataset(data_path="train.bin", block_size=config.block_size)
