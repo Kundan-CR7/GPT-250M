@@ -2,7 +2,8 @@ import os
 import time
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader,Subset
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import tiktoken
 
 # Import our custom modules
@@ -15,7 +16,7 @@ from model import GPT
 # ==========================================
 config = GPTConfig()
 target_batch_size = 32
-micro_batch_size = 4
+micro_batch_size = 8
 
 print("Initializing dataset...")
 train_dataset = GPTDataset(data_path="train.bin", block_size=config.block_size)
@@ -23,7 +24,7 @@ train_dataset = GPTDataset(data_path="train.bin", block_size=config.block_size)
 train_loader = DataLoader(
     train_dataset,
     batch_size=micro_batch_size,
-    shuffle=True,
+    shuffle=False,
     pin_memory=True,
     num_workers=2
 )
@@ -42,9 +43,14 @@ model.to(device)
 # ==========================================
 gradient_accumulation_steps = target_batch_size // micro_batch_size
 
+start_step = 0
+max_steps = 24414
+save_interval = 500
+
 scaler = torch.amp.GradScaler('cuda')
 learning_rate = 3e-4
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate,betas=(0.9, 0.95))
+scheduler = CosineAnnealingLR(optimizer=optimizer,T_max=max_steps,eta_min=1e-5)
 
 # ==========================================
 # 4. Checkpointing Setup (Google Drive)
@@ -56,9 +62,7 @@ os.makedirs(drive_path, exist_ok=True)
 checkpoint_path = os.path.join(drive_path, "best_model.pth")
 
 best_loss = float('inf')
-start_step = 0
-max_steps = 10000  
-save_interval = 500
+
 
 if os.path.exists(checkpoint_path):
     print(f"Loading checkpoint from Google Drive: {checkpoint_path}...")
@@ -67,6 +71,9 @@ if os.path.exists(checkpoint_path):
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     scaler.load_state_dict(checkpoint["scaler_state_dict"])
+
+    if("scheduler_state_dict" in checkpoint):
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
     
     start_step = checkpoint["step"] + 1
     best_loss = checkpoint["best_loss"]
@@ -110,7 +117,26 @@ def generate_sample(model, device, prompt="The ", max_new_tokens=30):
 # 5. The Training Loop
 # ==========================================
 model.train()
-train_iter = iter(train_loader)
+if start_step > 0:
+    # 1. Calculate exactly how many raw sequences we have consumed
+    samples_to_skip = start_step * micro_batch_size
+    print(f"⏩ O(1) Resume: Jumping directly to sequence index {samples_to_skip}...")
+    
+    # 2. Slice the dataset instantly
+    remaining_indices = range(samples_to_skip, len(train_dataset))
+    resumed_dataset = Subset(train_dataset, remaining_indices)
+    
+    # 3. Create a temporary dataloader just to finish this Epoch
+    train_loader_resumed = DataLoader(
+        resumed_dataset, 
+        batch_size=micro_batch_size, 
+        shuffle=False, 
+        pin_memory=True, 
+        num_workers=2
+    )
+    train_iter = iter(train_loader_resumed)
+else:
+    train_iter = iter(train_loader)
 optimizer.zero_grad(set_to_none=True)
 t0 = time.time()
 
@@ -134,9 +160,18 @@ for step in range(start_step, max_steps):
     scaler.scale(loss).backward()
     
     if ((step + 1) % gradient_accumulation_steps == 0):
+        #unscale gradients
+        scaler.unscale_(optimizer)
+        
+        #Clip gradients to a max norm of 1.0
+        torch.nn.utils.clip_grad_norm_(model.parameters(),max_norm=1.0)
+        
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+
+        #Shrink the learning rate 
+        scheduler.step()
 
     # ==========================================
     # 6. Logging and Checkpoint Saving
@@ -158,6 +193,7 @@ for step in range(start_step, max_steps):
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scaler_state_dict": scaler.state_dict(),
+                "scheduler_state_dict" : scheduler.state_dict(),
                 "best_loss": best_loss
             }
             torch.save(checkpoint, checkpoint_path)
