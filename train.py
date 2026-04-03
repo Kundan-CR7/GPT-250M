@@ -200,6 +200,5 @@ for step in range(start_step, max_steps):
             print(f"🌟 Saved best_model.pth to Drive! (Loss: {best_loss:.4f})")
 
             # Generate a sample right after saving the best model
-            generate_sample(model, device, prompt="Once upon a time", max_new_tokens=30)
 
 print("Training run completed!")
