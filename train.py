@@ -3,7 +3,7 @@ import time
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader,Subset
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import tiktoken
 
 # Import our custom modules
@@ -49,13 +49,18 @@ save_interval = 500
 
 scaler = torch.amp.GradScaler('cuda')
 learning_rate = 3e-4
+warmup_steps = 1000
+
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate,betas=(0.9, 0.95))
-scheduler = CosineAnnealingLR(optimizer=optimizer,T_max=max_steps,eta_min=1e-5)
+warmup_scheduler = LinearLR(optimizer, start_factor=0.01, end_factor=1.0,total_iters=warmup_steps)
+
+consine_scheduler = CosineAnnealingLR(optimizer,T_max=(max_steps-warmup_steps),eta_min=1e-5)
+
+scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, consine_scheduler],milestones=[warmup_steps])
 
 # ==========================================
 # 4. Checkpointing Setup (Google Drive)
 # ==========================================
-# Make sure you run: drive.mount('/content/drive') in Colab first!
 drive_path = "/content/drive/MyDrive/GPT_Project/checkpoints"
 os.makedirs(drive_path, exist_ok=True)
 
@@ -85,7 +90,7 @@ else:
 # 4.5 Evaluation Sampling Function
 # ==========================================
 def generate_sample(model, device, prompt="The ", max_new_tokens=30):
-    # Switch to evaluation mode (turns off dropout)
+    # Switch to evaluation mode
     model.eval()
     
     enc = tiktoken.get_encoding("gpt2")
