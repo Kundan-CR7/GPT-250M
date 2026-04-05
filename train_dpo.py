@@ -164,10 +164,8 @@ def main():
             optimizer.zero_grad()
 
             # 2. Instruct Model (Policy) Forward Pass
-            # If your model's forward pass doesn't take 'attention_mask', 
-            # you may need to update model.py to accept it for DPO padding to work correctly.
-            policy_chosen_logits = instruct_model(chosen_ids) 
-            policy_rejected_logits = instruct_model(rejected_ids)
+            policy_chosen_logits = instruct_model(chosen_ids, attention_mask=chosen_mask) 
+            policy_rejected_logits = instruct_model(rejected_ids, attention_mask=rejected_mask)
             
             if isinstance(policy_chosen_logits, tuple):
                 policy_chosen_logits = policy_chosen_logits[0]
@@ -178,8 +176,8 @@ def main():
 
             # 3. Reference Model Forward Pass
             with torch.no_grad():
-                ref_chosen_logits = ref_model(chosen_ids)
-                ref_rejected_logits = ref_model(rejected_ids)
+                ref_chosen_logits = ref_model(chosen_ids, attention_mask=chosen_mask)
+                ref_rejected_logits = ref_model(rejected_ids, attention_mask=rejected_mask)
                 
                 if isinstance(ref_chosen_logits, tuple):
                     ref_chosen_logits = ref_chosen_logits[0]
