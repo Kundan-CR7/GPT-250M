@@ -9,7 +9,7 @@ from torch.optim import AdamW
 # 1. LOCAL IMPORTS
 # ==========================================
 # Ensure these match the exact class/function names in your files
-from model import GPT 
+from model import GPT,GPTConfig
 from dataset import get_dpo_dataloader 
 from transformers import AutoTokenizer # Used to tokenize your JSONL dataset
 
@@ -96,9 +96,24 @@ def main():
     print(f"\nInitializing custom models on {device}...")
 
     # --- INITIALIZE MODELS ---
-    # NOTE: If your GPT() class requires a config object (e.g., GPT(config)), pass it here.
-    instruct_model = GPT().to(device) 
-    ref_model = GPT().to(device) 
+    print("Loading configuration...")
+    
+    # 1. First, load the checkpoint to see if you saved the config in it
+    base_checkpoint = torch.load(args.base_weights, map_location=device)
+    
+    # Check if your checkpoint has 'model_args' or 'config' saved inside it
+    if 'model_args' in base_checkpoint:
+        config_args = base_checkpoint['model_args']
+        config = GPTConfig(**config_args)
+        print("Config loaded from checkpoint.")
+    else:
+        # If not, initialize it manually with your 250M model parameters
+        print("Initializing default config...")
+        config = GPTConfig() # Add your parameters here if it doesn't have defaults, e.g., GPTConfig(vocab_size=50257, block_size=1024, ...)
+
+    print("Building models...")
+    instruct_model = GPT(config).to(device) 
+    ref_model = GPT(config).to(device) 
     
     # Load Pre-trained Base Weights
     if os.path.exists(args.base_weights):
