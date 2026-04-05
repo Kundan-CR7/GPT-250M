@@ -1,19 +1,21 @@
 import os
 import time
 import argparse
+import shutil
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import GradScaler, autocast
 
 from model import GPT, GPTConfig
 from dataset import get_dpo_dataloader
 from transformers import AutoTokenizer
 
 
-# ==========================================
-# LOG PROBABILITY EXTRACTION
-# ==========================================
+# ============================
+# LOG PROB FUNCTION
+# ============================
+
 def get_batch_logps(logits, labels, attention_mask):
 
     shifted_logits = logits[..., :-1, :].contiguous()
@@ -22,26 +24,28 @@ def get_batch_logps(logits, labels, attention_mask):
 
     log_probs = F.log_softmax(shifted_logits, dim=-1)
 
-    gathered_log_probs = torch.gather(
+    gathered = torch.gather(
         log_probs,
         dim=-1,
         index=shifted_labels.unsqueeze(-1)
     ).squeeze(-1)
 
-    gathered_log_probs = gathered_log_probs * shifted_mask
+    gathered = gathered * shifted_mask
 
-    return gathered_log_probs.sum(dim=-1)
+    return gathered.sum(dim=-1)
 
 
-# ==========================================
+# ============================
 # DPO LOSS
-# ==========================================
+# ============================
+
 def compute_dpo_loss(
-        policy_chosen_logps,
-        policy_rejected_logps,
-        ref_chosen_logps,
-        ref_rejected_logps,
-        beta):
+    policy_chosen_logps,
+    policy_rejected_logps,
+    ref_chosen_logps,
+    ref_rejected_logps,
+    beta
+):
 
     pi_logratios = policy_chosen_logps - policy_rejected_logps
     ref_logratios = ref_chosen_logps - ref_rejected_logps
@@ -55,10 +59,33 @@ def compute_dpo_loss(
     return loss.mean(), margin
 
 
-# ==========================================
-# CHECKPOINT FUNCTIONS
-# ==========================================
-def save_checkpoint(epoch, batch_idx, model, optimizer, path):
+# ============================
+# SAFE SAVE FUNCTION
+# ============================
+
+def safe_save(checkpoint, local_path, drive_path):
+
+    tmp_path = local_path + ".tmp"
+
+    torch.save(checkpoint, tmp_path)
+
+    os.replace(tmp_path, local_path)
+
+    if drive_path is not None:
+
+        try:
+            shutil.copy(local_path, drive_path)
+            print("☁️ Copied checkpoint to Drive")
+
+        except Exception as e:
+            print("⚠️ Drive copy failed:", e)
+
+
+# ============================
+# SAVE CHECKPOINT
+# ============================
+
+def save_checkpoint(epoch, batch_idx, model, optimizer, local_path, drive_path):
 
     checkpoint = {
         "epoch": epoch,
@@ -67,10 +94,14 @@ def save_checkpoint(epoch, batch_idx, model, optimizer, path):
         "optimizer_state_dict": optimizer.state_dict()
     }
 
-    torch.save(checkpoint, path)
+    safe_save(checkpoint, local_path, drive_path)
 
-    print(f"\n💾 Model saved -> {path}")
+    print(f"\n💾 Model saved -> {local_path}")
 
+
+# ============================
+# LOAD CHECKPOINT
+# ============================
 
 def load_checkpoint(model, optimizer, path):
 
@@ -83,11 +114,7 @@ def load_checkpoint(model, optimizer, path):
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-        start_epoch = checkpoint["epoch"]
-
-        print(f"✅ Resuming from epoch {start_epoch}")
-
-        return start_epoch
+        return checkpoint["epoch"]
 
     else:
 
@@ -96,27 +123,31 @@ def load_checkpoint(model, optimizer, path):
         return 0
 
 
-# ==========================================
-# MAIN TRAINING LOOP
-# ==========================================
+# ============================
+# MAIN
+# ============================
+
 def main():
 
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--data_path", type=str, required=True)
-    parser.add_argument("--checkpoint_dir", type=str, required=True)
+
+    parser.add_argument("--drive_checkpoint_dir", type=str, required=True)
+
     parser.add_argument("--base_weights", type=str, required=True)
 
     parser.add_argument("--tokenizer_name", type=str, default="gpt2")
 
     parser.add_argument("--batch_size", type=int, default=1)
+
     parser.add_argument("--epochs", type=int, default=3)
 
     parser.add_argument("--beta", type=float, default=0.1)
 
     parser.add_argument("--lr", type=float, default=1e-6)
 
-    parser.add_argument("--grad_accum_steps", type=int, default=8)
+    parser.add_argument("--grad_accum_steps", type=int, default=16)
 
     parser.add_argument("--save_interval", type=int, default=30)
 
@@ -124,25 +155,26 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    print("Using device:", device)
 
-    checkpoint_path = os.path.join(
-        args.checkpoint_dir,
-        "dpo_latest_checkpoint.pth"
-    )
+    # LOCAL CHECKPOINT DIR (FAST)
+    local_ckpt_dir = "/content/checkpoints"
+    os.makedirs(local_ckpt_dir, exist_ok=True)
 
-    best_model_path = os.path.join(
-        args.checkpoint_dir,
-        "dpo_best_model.pth"
-    )
+    # DRIVE CHECKPOINT DIR (BACKUP)
+    os.makedirs(args.drive_checkpoint_dir, exist_ok=True)
+
+    local_best = os.path.join(local_ckpt_dir, "dpo_best_model.pth")
+    drive_best = os.path.join(args.drive_checkpoint_dir, "dpo_best_model.pth")
+
+    local_latest = os.path.join(local_ckpt_dir, "dpo_latest_checkpoint.pth")
+    drive_latest = os.path.join(args.drive_checkpoint_dir, "dpo_latest_checkpoint.pth")
 
     save_interval_seconds = args.save_interval * 60
 
-    print(f"\nUsing device: {device}")
-
-    # ==========================================
+    # ============================
     # LOAD BASE MODEL
-    # ==========================================
+    # ============================
 
     base_checkpoint = torch.load(args.base_weights, map_location=device)
 
@@ -161,7 +193,7 @@ def main():
 
     print("Base model loaded")
 
-    # Freeze reference model
+    # freeze reference model
 
     ref_model.eval()
 
@@ -170,32 +202,16 @@ def main():
 
     ref_model.half()
 
-    # ==========================================
-    # OPTIMIZER
-    # ==========================================
-
     optimizer = AdamW(instruct_model.parameters(), lr=args.lr)
 
-    scaler = GradScaler()
+    scaler = GradScaler("cuda")
 
-    start_epoch = load_checkpoint(
-        instruct_model,
-        optimizer,
-        checkpoint_path
-    )
-
-    # ==========================================
-    # TOKENIZER
-    # ==========================================
+    start_epoch = load_checkpoint(instruct_model, optimizer, local_latest)
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    # ==========================================
-    # DATASET
-    # ==========================================
 
     train_loader = get_dpo_dataloader(
         jsonl_path=args.data_path,
@@ -209,11 +225,7 @@ def main():
 
     optimizer.zero_grad()
 
-    best_loss = float("inf")
-
-    # ==========================================
-    # TRAINING
-    # ==========================================
+    best_loss = 10  # prevent too many early saves
 
     for epoch in range(start_epoch, args.epochs):
 
@@ -227,9 +239,7 @@ def main():
             rejected_ids = batch["rejected_ids"].to(device)
             rejected_mask = batch["rejected_mask"].to(device)
 
-            with autocast():
-
-                # Policy forward
+            with autocast("cuda"):
 
                 policy_chosen_logits = instruct_model(
                     chosen_ids,
@@ -242,7 +252,6 @@ def main():
                 )
 
                 if isinstance(policy_chosen_logits, tuple):
-
                     policy_chosen_logits = policy_chosen_logits[0]
                     policy_rejected_logits = policy_rejected_logits[0]
 
@@ -258,8 +267,6 @@ def main():
                     rejected_mask
                 )
 
-                # Reference forward
-
                 with torch.no_grad():
 
                     ref_chosen_logits = ref_model(
@@ -273,7 +280,6 @@ def main():
                     )
 
                     if isinstance(ref_chosen_logits, tuple):
-
                         ref_chosen_logits = ref_chosen_logits[0]
                         ref_rejected_logits = ref_rejected_logits[0]
 
@@ -306,8 +312,7 @@ def main():
                 scaler.unscale_(optimizer)
 
                 torch.nn.utils.clip_grad_norm_(
-                    instruct_model.parameters(),
-                    1.0
+                    instruct_model.parameters(), 1.0
                 )
 
                 scaler.step(optimizer)
@@ -316,10 +321,6 @@ def main():
                 optimizer.zero_grad()
 
             actual_loss = loss.item() * args.grad_accum_steps
-
-            # ==========================================
-            # BEST MODEL SAVE
-            # ==========================================
 
             if actual_loss < best_loss - 0.01:
 
@@ -330,14 +331,11 @@ def main():
                     batch_idx,
                     instruct_model,
                     optimizer,
-                    best_model_path
+                    local_best,
+                    drive_best
                 )
 
-                print("🏆 New best model saved!")
-
-            # ==========================================
-            # LOGGING
-            # ==========================================
+                print("🏆 New best model saved")
 
             if batch_idx % 10 == 0:
 
@@ -345,10 +343,6 @@ def main():
                     f"Epoch {epoch} | Batch {batch_idx} | "
                     f"Loss {actual_loss:.4f} | Margin {margin:.3f}"
                 )
-
-            # ==========================================
-            # TIMER CHECKPOINT
-            # ==========================================
 
             current_time = time.time()
 
@@ -359,12 +353,13 @@ def main():
                     batch_idx,
                     instruct_model,
                     optimizer,
-                    checkpoint_path
+                    local_latest,
+                    drive_latest
                 )
 
                 last_save_time = time.time()
 
-    print("\n🎉 DPO Training Complete!")
+    print("\n🎉 DPO Training Complete")
 
 
 if __name__ == "__main__":
