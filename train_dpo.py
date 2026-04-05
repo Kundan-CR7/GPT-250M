@@ -78,13 +78,17 @@ def load_checkpoint(model, optimizer, path):
 def main():
     parser = argparse.ArgumentParser(description="Run DPO Training on Custom GPT Model")
     parser.add_argument("--data_path", type=str, required=True, help="Path to your chosen/rejected JSONL dataset")
-    parser.add_argument("--checkpoint_dir", type=str, required=True, help="Path to save checkpoints (e.g., Google Drive)")
+    parser.add_argument("--checkpoint_dir", type=str, required=True, help="Path to save checkpoints")
     parser.add_argument("--base_weights", type=str, required=True, help="Path to pre-trained .pth weights")
     parser.add_argument("--tokenizer_name", type=str, default="gpt2", help="HuggingFace tokenizer ID")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--beta", type=float, default=0.1)
     parser.add_argument("--save_interval", type=int, default=30, help="Save interval in minutes")
+    
+    # NEW ARGUMENTS
+    parser.add_argument("--lr", type=float, default=1e-6, help="Learning rate (usually 1e-6 or 5e-7 for DPO)")
+    parser.add_argument("--grad_accum_steps", type=int, default=4, help="Number of steps to accumulate gradients")
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -94,54 +98,39 @@ def main():
 
     print(f"\nInitializing custom models on {device}...")
 
-    # --- INITIALIZE MODELS ---
-    print("Loading configuration and building models...")
-    
     if os.path.exists(args.base_weights):
-        # Load the file ONCE safely
         base_checkpoint = torch.load(args.base_weights, map_location=device)
-        
-        # 1. Extract Config
         if 'model_args' in base_checkpoint:
             config_args = base_checkpoint['model_args']
             config = GPTConfig(**config_args)
-            print("Config loaded from checkpoint.")
         else:
-            print("Initializing default config...")
             config = GPTConfig()
             
-        # 2. Build Models
         instruct_model = GPT(config).to(device) 
         ref_model = GPT(config).to(device) 
         
-        # 3. Load Weights
         state_dict = base_checkpoint.get('model_state_dict', base_checkpoint)
         instruct_model.load_state_dict(state_dict)
         ref_model.load_state_dict(state_dict)
         print(f"Loaded base weights from {args.base_weights}")
-        
     else:
-        # Fallback if the file is completely missing
-        print(f"WARNING: Base weights not found at {args.base_weights}. Initializing from scratch.")
+        print(f"WARNING: Base weights not found. Initializing from scratch.")
         config = GPTConfig()
         instruct_model = GPT(config).to(device) 
         ref_model = GPT(config).to(device) 
 
-    # Freeze the Reference Model
     ref_model.eval()
     for param in ref_model.parameters():
         param.requires_grad = False
 
-    optimizer = AdamW(instruct_model.parameters(), lr=1e-5)
+    # UPDATED OPTIMIZER TO USE COMMAND LINE LR
+    optimizer = AdamW(instruct_model.parameters(), lr=args.lr)
     start_epoch = load_checkpoint(instruct_model, optimizer, checkpoint_path)
 
-    # --- INITIALIZE DATALOADER ---
-    print(f"Loading tokenizer: {args.tokenizer_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print("Loading dataset...")
     train_loader = get_dpo_dataloader(
         jsonl_path=args.data_path, 
         tokenizer=tokenizer, 
@@ -151,19 +140,18 @@ def main():
     print("\nStarting DPO Training...")
     last_save_time = time.time()
     instruct_model.train()
+    
+    # Initialize gradient zeroing before the loop
+    optimizer.zero_grad()
 
     for epoch in range(start_epoch, args.epochs):
         for batch_idx, batch in enumerate(train_loader): 
             
-            # 1. Unpack batch and move to device
             chosen_ids = batch["chosen_ids"].to(device)
             chosen_mask = batch["chosen_mask"].to(device)
             rejected_ids = batch["rejected_ids"].to(device)
             rejected_mask = batch["rejected_mask"].to(device)
 
-            optimizer.zero_grad()
-
-            # 2. Instruct Model (Policy) Forward Pass
             policy_chosen_logits = instruct_model(chosen_ids, attention_mask=chosen_mask) 
             policy_rejected_logits = instruct_model(rejected_ids, attention_mask=rejected_mask)
             
@@ -174,7 +162,6 @@ def main():
             policy_chosen_logps = get_batch_logps(policy_chosen_logits, chosen_ids, chosen_mask)
             policy_rejected_logps = get_batch_logps(policy_rejected_logits, rejected_ids, rejected_mask)
 
-            # 3. Reference Model Forward Pass
             with torch.no_grad():
                 ref_chosen_logits = ref_model(chosen_ids, attention_mask=chosen_mask)
                 ref_rejected_logits = ref_model(rejected_ids, attention_mask=rejected_mask)
@@ -186,7 +173,6 @@ def main():
                 ref_chosen_logps = get_batch_logps(ref_chosen_logits, chosen_ids, chosen_mask)
                 ref_rejected_logps = get_batch_logps(ref_rejected_logits, rejected_ids, rejected_mask)
 
-            # 4. Calculate Loss & Backpropagate
             loss = compute_dpo_loss(
                 policy_chosen_logps, 
                 policy_rejected_logps, 
@@ -195,22 +181,26 @@ def main():
                 args.beta
             )
             
+            # GRADIENT ACCUMULATION LOGIC
+            # Scale the loss to account for accumulation
+            loss = loss / args.grad_accum_steps
             loss.backward()
-            optimizer.step()
 
-            # Print Progress
+            # Only step the optimizer every N batches
+            if (batch_idx + 1) % args.grad_accum_steps == 0 or (batch_idx + 1) == len(train_loader):
+                optimizer.step()
+                optimizer.zero_grad()
+
             if batch_idx % 10 == 0:
-                print(f"Epoch {epoch} | Batch {batch_idx} | DPO Loss: {loss.item():.4f}")
+                # Multiply back the loss just for printing accurately
+                print(f"Epoch {epoch} | Batch {batch_idx} | DPO Loss: {loss.item() * args.grad_accum_steps:.4f}")
 
-            # 5. Timer Check
             current_time = time.time()
             if current_time - last_save_time >= save_interval_seconds:
                 print(f"\n[⏱️ TIMER] {args.save_interval} minutes elapsed!")
                 save_checkpoint(epoch, batch_idx, instruct_model, optimizer, checkpoint_path)
                 last_save_time = time.time()
                 print("Resuming training...\n")
-
-    print("\n🎉 Custom DPO Training Complete!")
 
 if __name__ == "__main__":
     main()
