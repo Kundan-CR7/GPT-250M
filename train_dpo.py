@@ -8,10 +8,9 @@ from torch.optim import AdamW
 # ==========================================
 # 1. LOCAL IMPORTS
 # ==========================================
-# Ensure these match the exact class/function names in your files
-from model import GPT,GPTConfig
+from model import GPT, GPTConfig
 from dataset import get_dpo_dataloader 
-from transformers import AutoTokenizer # Used to tokenize your JSONL dataset
+from transformers import AutoTokenizer
 
 # ==========================================
 # 2. DPO HELPER FUNCTIONS
@@ -96,36 +95,37 @@ def main():
     print(f"\nInitializing custom models on {device}...")
 
     # --- INITIALIZE MODELS ---
-    print("Loading configuration...")
+    print("Loading configuration and building models...")
     
-    # 1. First, load the checkpoint to see if you saved the config in it
-    base_checkpoint = torch.load(args.base_weights, map_location=device)
-    
-    # Check if your checkpoint has 'model_args' or 'config' saved inside it
-    if 'model_args' in base_checkpoint:
-        config_args = base_checkpoint['model_args']
-        config = GPTConfig(**config_args)
-        print("Config loaded from checkpoint.")
-    else:
-        # If not, initialize it manually with your 250M model parameters
-        print("Initializing default config...")
-        config = GPTConfig() # Add your parameters here if it doesn't have defaults, e.g., GPTConfig(vocab_size=50257, block_size=1024, ...)
-
-    print("Building models...")
-    instruct_model = GPT(config).to(device) 
-    ref_model = GPT(config).to(device) 
-    
-    # Load Pre-trained Base Weights
     if os.path.exists(args.base_weights):
+        # Load the file ONCE safely
         base_checkpoint = torch.load(args.base_weights, map_location=device)
-        state_dict = base_checkpoint['model_state_dict'] if 'model_state_dict' in base_checkpoint else base_checkpoint
         
-        # Load weights into both models
+        # 1. Extract Config
+        if 'model_args' in base_checkpoint:
+            config_args = base_checkpoint['model_args']
+            config = GPTConfig(**config_args)
+            print("Config loaded from checkpoint.")
+        else:
+            print("Initializing default config...")
+            config = GPTConfig()
+            
+        # 2. Build Models
+        instruct_model = GPT(config).to(device) 
+        ref_model = GPT(config).to(device) 
+        
+        # 3. Load Weights
+        state_dict = base_checkpoint.get('model_state_dict', base_checkpoint)
         instruct_model.load_state_dict(state_dict)
         ref_model.load_state_dict(state_dict)
         print(f"Loaded base weights from {args.base_weights}")
+        
     else:
+        # Fallback if the file is completely missing
         print(f"WARNING: Base weights not found at {args.base_weights}. Initializing from scratch.")
+        config = GPTConfig()
+        instruct_model = GPT(config).to(device) 
+        ref_model = GPT(config).to(device) 
 
     # Freeze the Reference Model
     ref_model.eval()
@@ -164,7 +164,8 @@ def main():
             optimizer.zero_grad()
 
             # 2. Instruct Model (Policy) Forward Pass
-            # Adjust `instruct_model(...)` if your forward pass returns a tuple (e.g., logits, loss)
+            # If your model's forward pass doesn't take 'attention_mask', 
+            # you may need to update model.py to accept it for DPO padding to work correctly.
             policy_chosen_logits = instruct_model(chosen_ids) 
             policy_rejected_logits = instruct_model(rejected_ids)
             
