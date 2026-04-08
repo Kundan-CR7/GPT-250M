@@ -44,11 +44,11 @@ model.to(device)
 gradient_accumulation_steps = target_batch_size // micro_batch_size
 
 start_step = 0
-max_steps = 1220704
+max_steps = 610352
 save_interval = 500
 
 scaler = torch.amp.GradScaler('cuda')
-learning_rate = 3e-4
+learning_rate = 5e-4
 warmup_steps = 10000
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate,betas=(0.9, 0.95))
@@ -191,19 +191,26 @@ for step in range(start_step, max_steps):
         t0 = time.time() 
 
     if ((step + 1) % gradient_accumulation_steps == 0):
-        if real_loss < best_loss:
+        checkpoint = {
+            "step": step,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scaler_state_dict": scaler.state_dict(),
+            "scheduler_state_dict" : scheduler.state_dict(),
+            "best_loss": best_loss if 'best_loss' in locals() else real_loss
+        }
+        if(step >= 400 and real_loss < best_loss):
             best_loss = real_loss
-            checkpoint = {
-                "step": step,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scaler_state_dict": scaler.state_dict(),
-                "scheduler_state_dict" : scheduler.state_dict(),
-                "best_loss": best_loss
-            }
-            torch.save(checkpoint, checkpoint_path)
-            print(f"🌟 Saved best_model.pth to Drive! (Loss: {best_loss:.4f})")
+            best_path = "/content/drive/MyDrive/GPT_Project/checkpoints/best_model.pth"
+            torch.save(checkpoint, best_path)
+            print(f"🌟 New Best Model! Saved to Drive (Loss: {best_loss:.4f})")
 
-            # Generate a sample right after saving the best model
+        if(step > 0 and step % 1000 == 0):
+            interval_path = "/content/drive/MyDrive/GPT_Project/checkpoints/latest_step_model.pth"
+            torch.save(checkpoint, interval_path)
+            print(f"💾 Interval Backup! Saved step {step} to Drive.")
+            
+            # This is a great place to run your sample generator!
+            generate_sample(model, device)
 
 print("Training run completed!")
