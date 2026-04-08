@@ -36,32 +36,46 @@ class CausalSelfAttention(nn.Module):
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size,config.block_size))
                              .view(1,1,config.block_size, config.block_size))
         
-    def forward(self, x, attention_mask=None): # <-- Added attention_mask
-        B,T,C = x.size()
+def forward(self, x, attention_mask=None): 
+        B, T, C = x.size()
 
+        # Calculate query, key, values for all heads in batch and move head forward to be the batch dim
         qkv = self.c_attn(x)
-        q,k,v = qkv.split(self.n_embd,dim=2)   
+        q, k, v = qkv.split(self.n_embd, dim=2)   
 
-        k = k.view(B,T, self.n_head, C//self.n_head).transpose(1,2)
-        q = q.view(B,T, self.n_head, C//self.n_head).transpose(1,2)
-        v = v.view(B,T, self.n_head, C//self.n_head).transpose(1,2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        att = (q @ k.transpose(-2,-1) * (1.0 / math.sqrt(k.size(-1))))    
+        if attention_mask is None:
+            # FAST PATH: Used during pre-training
+            # PyTorch 2.0+ Flash Attention bypasses the N^2 memory matrix creation
+            y = F.scaled_dot_product_attention(
+                q, k, v, 
+                dropout_p=self.attn_dropout.p if self.training else 0.0, 
+                is_causal=True
+            )
+        else:
+            # FALLBACK PATH: Used during DPO/Fine-tuning with custom padding masks
+            # Standard manual attention calculation
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            
+            # Apply standard causal mask (future tokens)
+            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float("-inf"))
+            
+            # Apply padding mask (if provided by DPO dataloader)
+            attention_mask_reshaped = attention_mask.view(B, 1, 1, T)
+            att = att.masked_fill(attention_mask_reshaped == 0, float("-inf"))
+
+            att = F.softmax(att, dim=-1)
+            att = self.attn_dropout(att)
+            
+            y = att @ v      
+
+        # Re-assemble all head outputs side by side
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
         
-        # 1. Apply the standard causal mask (future tokens)
-        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float("-inf"))
-
-        # 2. Apply the padding mask (if provided by DPO dataloader)
-        if attention_mask is not None:
-            # Reshape from (B, T) to (B, 1, 1, T) so it broadcasts across heads and sequence length
-            attention_mask = attention_mask.view(B, 1, 1, T)
-            att = att.masked_fill(attention_mask == 0, float("-inf"))
-
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-
-        y = att @ v     
-        y = y.transpose(1,2).contiguous().view(B,T,C)
+        # Output projection
         y = self.resid_dropout(self.c_proj(y))
 
         return y
