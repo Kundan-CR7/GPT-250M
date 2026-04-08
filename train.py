@@ -19,7 +19,7 @@ target_batch_size = 32
 micro_batch_size = 8
 
 print("Initializing dataset...")
-train_dataset = GPTDataset(data_path="train.bin", block_size=config.block_size)
+train_dataset = GPTDataset(data_path="/content/drive/MyDrive/GPT_Project/data/train.bin", block_size=config.block_size)
 
 train_loader = DataLoader(
     train_dataset,
@@ -44,12 +44,12 @@ model.to(device)
 gradient_accumulation_steps = target_batch_size // micro_batch_size
 
 start_step = 0
-max_steps = 24414
+max_steps = 1220704
 save_interval = 500
 
 scaler = torch.amp.GradScaler('cuda')
 learning_rate = 3e-4
-warmup_steps = 1000
+warmup_steps = 10000
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate,betas=(0.9, 0.95))
 warmup_scheduler = LinearLR(optimizer, start_factor=0.01, end_factor=1.0,total_iters=warmup_steps)
