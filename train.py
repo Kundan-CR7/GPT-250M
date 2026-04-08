@@ -205,7 +205,7 @@ for step in range(start_step, max_steps):
             torch.save(checkpoint, best_path)
             print(f"🌟 New Best Model! Saved to Drive (Loss: {best_loss:.4f})")
 
-        if(step > 0 and step % 1000 == 0):
+        if((step+1) % 1000 == 0):
             interval_path = "/content/drive/MyDrive/GPT_Project/checkpoints/latest_step_model.pth"
             torch.save(checkpoint, interval_path)
             print(f"💾 Interval Backup! Saved step {step} to Drive.")
