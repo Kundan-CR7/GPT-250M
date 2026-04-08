@@ -36,7 +36,7 @@ class CausalSelfAttention(nn.Module):
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size,config.block_size))
                              .view(1,1,config.block_size, config.block_size))
         
-def forward(self, x, attention_mask=None): 
+    def forward(self, x, attention_mask=None): 
         B, T, C = x.size()
 
         # Calculate query, key, values for all heads in batch and move head forward to be the batch dim
