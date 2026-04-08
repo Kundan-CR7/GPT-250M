@@ -71,7 +71,7 @@ best_loss = float('inf')
 
 if os.path.exists(checkpoint_path):
     print(f"Loading checkpoint from Google Drive: {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
     
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -82,6 +82,12 @@ if os.path.exists(checkpoint_path):
     
     start_step = checkpoint["step"] + 1
     best_loss = checkpoint["best_loss"]
+
+    del checkpoint
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    
     print(f"Successfully resumed! Starting from step {start_step}")
 else:
     print("No checkpoint found in Drive. Starting training from scratch!")
