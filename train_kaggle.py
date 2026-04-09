@@ -47,8 +47,8 @@ config = GPTConfig()
 # ⚡ DDP MATH: Target is 32. 
 # 2 GPUs * 8 micro_batch = 16 sequences per forward pass.
 # 32 / 16 = 2 gradient accumulation steps (Twice as fast as Colab!)
-target_batch_size = 32
-micro_batch_size = 4
+target_batch_size = 36
+micro_batch_size = 6
 assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
 gradient_accumulation_steps = target_batch_size // (micro_batch_size * ddp_world_size)
 
