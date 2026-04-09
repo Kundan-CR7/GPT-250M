@@ -38,6 +38,10 @@ print(f"Training on device: {device}")
 model = GPT(config)
 model.to(device)
 
+if torch.cuda.device_count() > 1:
+    print("Using", torch.cuda.device_count(), "GPUs")
+    model = torch.nn.DataParallel(model)
+
 # ==========================================
 # 3. Optimization Setup
 # ==========================================
