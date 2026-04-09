@@ -64,7 +64,7 @@ scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, consine_schedu
 drive_path = "/content/drive/MyDrive/GPT_Project/checkpoints"
 os.makedirs(drive_path, exist_ok=True)
 
-checkpoint_path = os.path.join(drive_path, "best_model.pth")
+checkpoint_path = os.path.join(drive_path, "latest_step_model.pth")
 
 best_loss = float('inf')
 
