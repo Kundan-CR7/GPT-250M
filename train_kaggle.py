@@ -30,7 +30,7 @@ DATA_PATH = "/kaggle/working/train.bin"
 config = GPTConfig()
 
 target_batch_size = 128   # 🔥 increased
-micro_batch_size = 8     # 🔥 increased
+micro_batch_size = 16     # 🔥 increased
 
 gradient_accumulation_steps = target_batch_size // micro_batch_size
 
