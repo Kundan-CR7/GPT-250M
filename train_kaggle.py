@@ -53,7 +53,7 @@ assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
 gradient_accumulation_steps = target_batch_size // (micro_batch_size * ddp_world_size)
 
 # Update this path to your Kaggle dataset input!
-data_path = "/kaggle/input/your-dataset-name/train.bin" 
+data_path = "/kaggle/input/datasets/kundan8918/trainbin/train.bin" 
 
 if master_process:
     print("Initializing dataset...")
