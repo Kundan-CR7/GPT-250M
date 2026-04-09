@@ -207,7 +207,7 @@ for step in range(start_step, max_steps):
         }
         if(step >= 400 and real_loss < best_loss):
             best_loss = real_loss
-            best_path = "/content/drive/MyDrive/GPT_Project/checkpoints/best_model.pth"
+            best_path = "/kaggle/input/datasets/kundan8918/trainbin/best_model.pth"
             torch.save(checkpoint, best_path)
             print(f"🌟 New Best Model! Saved to Drive (Loss: {best_loss:.4f})")
 
