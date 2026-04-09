@@ -19,7 +19,7 @@ target_batch_size = 32
 micro_batch_size = 8
 
 print("Initializing dataset...")
-train_dataset = GPTDataset(data_path="/kaggle/input/datasets/kundan8918/trainbin/train.bin", block_size=config.block_size)
+train_dataset = GPTDataset(data_path="/content/drive/MyDrive/GPT_Project/data/train.bin", block_size=config.block_size)
 
 train_loader = DataLoader(
     train_dataset,
@@ -37,10 +37,6 @@ print(f"Training on device: {device}")
 
 model = GPT(config)
 model.to(device)
-
-if torch.cuda.device_count() > 1:
-    print("Using", torch.cuda.device_count(), "GPUs")
-    model = torch.nn.DataParallel(model)
 
 # ==========================================
 # 3. Optimization Setup
@@ -65,36 +61,36 @@ scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, consine_schedu
 # ==========================================
 # 4. Checkpointing Setup (Google Drive)
 # ==========================================
-# drive_path = "/content/drive/MyDrive/GPT_Project/checkpoints"
-# os.makedirs(drive_path, exist_ok=True)
+drive_path = "/content/drive/MyDrive/GPT_Project/checkpoints"
+os.makedirs(drive_path, exist_ok=True)
 
-# checkpoint_path = os.path.join(drive_path, "latest_step_model.pth")
+checkpoint_path = os.path.join(drive_path, "latest_step_model.pth")
 
-# best_loss = float('inf')
+best_loss = float('inf')
 
 
-# if os.path.exists(checkpoint_path):
-#     print(f"Loading checkpoint from Google Drive: {checkpoint_path}...")
-#     checkpoint = torch.load(checkpoint_path, map_location="cpu")
+if os.path.exists(checkpoint_path):
+    print(f"Loading checkpoint from Google Drive: {checkpoint_path}...")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
     
-#     model.load_state_dict(checkpoint["model_state_dict"])
-#     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-#     scaler.load_state_dict(checkpoint["scaler_state_dict"])
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
-#     if("scheduler_state_dict" in checkpoint):
-#         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    if("scheduler_state_dict" in checkpoint):
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
     
-#     start_step = checkpoint["step"] + 1
-#     best_loss = checkpoint["best_loss"]
+    start_step = checkpoint["step"] + 1
+    best_loss = checkpoint["best_loss"]
 
-#     del checkpoint
-#     import gc
-#     gc.collect()
-#     torch.cuda.empty_cache()
+    del checkpoint
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
     
-#     print(f"Successfully resumed! Starting from step {start_step}")
-# else:
-#     print("No checkpoint found in Drive. Starting training from scratch!")
+    print(f"Successfully resumed! Starting from step {start_step}")
+else:
+    print("No checkpoint found in Drive. Starting training from scratch!")
 
 # ==========================================
 # 4.5 Evaluation Sampling Function
@@ -211,7 +207,7 @@ for step in range(start_step, max_steps):
         }
         if(step >= 400 and real_loss < best_loss):
             best_loss = real_loss
-            best_path = "/kaggle/input/datasets/kundan8918/trainbin/best_model.pth"
+            best_path = "/content/drive/MyDrive/GPT_Project/checkpoints/best_model.pth"
             torch.save(checkpoint, best_path)
             print(f"🌟 New Best Model! Saved to Drive (Loss: {best_loss:.4f})")
 
