@@ -84,11 +84,13 @@ if master_process:
 working_checkpoint = os.path.join(drive_path, "latest_step_model.pth")
 input_checkpoint = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_step_model.pth"
 
+# 💥 FORCE A CLEAN START: Hardcode to None and comment out the checks!
 load_path = None
-if os.path.exists(working_checkpoint):
-    load_path = working_checkpoint      
-elif os.path.exists(input_checkpoint):
-    load_path = input_checkpoint        
+
+# if os.path.exists(working_checkpoint):
+#     load_path = working_checkpoint      
+# elif os.path.exists(input_checkpoint):
+#     load_path = input_checkpoint        
 
 best_loss = float('inf')
 
@@ -171,7 +173,7 @@ model.train()
 def create_batch_generator(dataset, micro_batch_size, ddp_rank, start_step, seed=42):
     g = torch.Generator()
     
-    # By adding start_step to the seed, if we crash and resume at Step 44,000, 
+    # By adding start_step to the seed, if we crash and resume, 
     # the generator produces brand NEW random numbers instead of repeating!
     g.manual_seed(seed + ddp_rank + start_step) 
     
