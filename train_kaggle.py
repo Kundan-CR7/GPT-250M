@@ -2,8 +2,7 @@ import os
 import time
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
-from torch.utils.data.distributed import DistributedSampler
+# Removed heavy PyTorch DataLoaders to prevent SIGKILL (-9) RAM crashes
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -46,14 +45,14 @@ config = GPTConfig()
 
 # ⚡ DDP MATH: Target is 32. 
 # 2 GPUs * 8 micro_batch = 16 sequences per forward pass.
-# 32 / 16 = 2 gradient accumulation steps (Twice as fast as Colab!)
+# 32 / 16 = 2 gradient accumulation steps
 target_batch_size = 36
 micro_batch_size = 6
 assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
 gradient_accumulation_steps = target_batch_size // (micro_batch_size * ddp_world_size)
 
-# Update this path to your Kaggle dataset input!
-data_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"
+# Update this path to exactly what the search script found!
+data_path = "/kaggle/input/gpt-250m-training-data/train.bin"
 
 if master_process:
     print("Initializing dataset...")
@@ -98,8 +97,7 @@ if master_process:
 working_checkpoint = os.path.join(drive_path, "latest_step_model.pth")
 
 # 2. Where we load your UPLOADED checkpoint from (Read-Only)
-# ⚠️ This path must exactly match where your uploaded dataset is!
-input_checkpoint = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_step_model.pth"
+input_checkpoint = "/kaggle/input/gpt-250m-training-data/latest_step_model.pth"
 
 # 3. Determine which file to load
 load_path = None
@@ -176,23 +174,33 @@ def generate_sample(model, device, prompt="The ", max_new_tokens=30):
 # ==========================================
 model.train()
 
-# Set up the DataLoader with DistributedSampler for DDP
-if start_step > 0:
-    # Calculate global sequences consumed across ALL GPUs
-    samples_to_skip = start_step * (micro_batch_size * ddp_world_size)
-    if master_process:
-        print(f"⏩ O(1) Resume: Jumping directly to sequence index {samples_to_skip}...")
+# 💥 THE FIX: A RAM-Free Custom Generator to replace PyTorch's heavy DataLoader
+def create_batch_generator(dataset, micro_batch_size, ddp_world_size, ddp_rank, start_step):
+    current_global_idx = start_step * (micro_batch_size * ddp_world_size)
     
-    remaining_indices = range(samples_to_skip, len(train_dataset))
-    resumed_dataset = Subset(train_dataset, remaining_indices)
-    
-    sampler = DistributedSampler(resumed_dataset, shuffle=False) if ddp else None
-    train_loader = DataLoader(resumed_dataset, batch_size=micro_batch_size, sampler=sampler, shuffle=False, pin_memory=True, num_workers=0)
-else:
-    sampler = DistributedSampler(train_dataset, shuffle=False) if ddp else None
-    train_loader = DataLoader(train_dataset, batch_size=micro_batch_size, sampler=sampler, shuffle=False, pin_memory=True, num_workers=0)
+    while True:
+        rank_start_idx = current_global_idx + (ddp_rank * micro_batch_size)
+        
+        x_batch, y_batch = [], []
+        for i in range(micro_batch_size):
+            idx = rank_start_idx + i
+            if idx >= len(dataset):
+                idx = idx % len(dataset) # Wrap around safely if we hit the end of the file
+            
+            x, y = dataset[idx]
+            x_batch.append(x)
+            y_batch.append(y)
+            
+        yield torch.stack(x_batch), torch.stack(y_batch)
+        
+        # Advance the global index for the next step
+        current_global_idx += (micro_batch_size * ddp_world_size)
 
-train_iter = iter(train_loader)
+if master_process:
+    print("Initializing RAM-free batch generator...")
+
+train_iter = create_batch_generator(train_dataset, micro_batch_size, ddp_world_size, ddp_rank, start_step)
+
 optimizer.zero_grad(set_to_none=True)
 t0 = time.time()
 
@@ -200,12 +208,9 @@ if master_process:
     print("Starting distributed training loop...")
 
 for step in range(start_step, max_steps):
-    try:
-        x, y = next(train_iter)
-    except StopIteration:
-        train_iter = iter(train_loader)
-        x, y = next(train_iter)
-        
+    
+    # ⚡ No try/except needed, our generator yields infinitely!
+    x, y = next(train_iter)
     x, y = x.to(device), y.to(device)
 
     # Disable gradient sync for accumulation steps to dramatically speed up DDP
@@ -236,14 +241,11 @@ for step in range(start_step, max_steps):
     # 8. Logging and Checkpoint Saving (Master Only)
     # ==========================================
     if master_process:
-        # In DDP, this loss is technically only GPU 0's loss, but it's an accurate enough 
-        # representation without slowing down the GPUs by forcing them to sync and average.
         real_loss = loss.item() * gradient_accumulation_steps
         
         if step % 10 == 0 and step > 0:
             t1 = time.time()
             dt = t1 - t0
-            # Global tokens processed across all GPUs
             tokens_processed = 10 * (micro_batch_size * ddp_world_size) * config.block_size
             print(f"Step {step:5d} | Loss: {real_loss:.4f} | Speed: {(tokens_processed / dt):.2f} tok/sec")
             t0 = time.time() 
