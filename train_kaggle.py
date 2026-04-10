@@ -187,10 +187,10 @@ if start_step > 0:
     resumed_dataset = Subset(train_dataset, remaining_indices)
     
     sampler = DistributedSampler(resumed_dataset, shuffle=False) if ddp else None
-    train_loader = DataLoader(resumed_dataset, batch_size=micro_batch_size, sampler=sampler, shuffle=False, pin_memory=True, num_workers=2)
+    train_loader = DataLoader(resumed_dataset, batch_size=micro_batch_size, sampler=sampler, shuffle=False, pin_memory=True, num_workers=0)
 else:
     sampler = DistributedSampler(train_dataset, shuffle=False) if ddp else None
-    train_loader = DataLoader(train_dataset, batch_size=micro_batch_size, sampler=sampler, shuffle=False, pin_memory=True, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=micro_batch_size, sampler=sampler, shuffle=False, pin_memory=True, num_workers=0)
 
 train_iter = iter(train_loader)
 optimizer.zero_grad(set_to_none=True)
