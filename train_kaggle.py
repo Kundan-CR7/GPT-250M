@@ -53,7 +53,7 @@ assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
 gradient_accumulation_steps = target_batch_size // (micro_batch_size * ddp_world_size)
 
 # Update this path to your Kaggle dataset input!
-data_path = "/kaggle/input/gpt-250m-training-data/train.bin"
+data_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"
 
 if master_process:
     print("Initializing dataset...")
@@ -99,7 +99,7 @@ working_checkpoint = os.path.join(drive_path, "latest_step_model.pth")
 
 # 2. Where we load your UPLOADED checkpoint from (Read-Only)
 # ⚠️ This path must exactly match where your uploaded dataset is!
-input_checkpoint = "/kaggle/input/gpt-250m-training-data/latest_step_model.pth"
+input_checkpoint = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_step_model.pth"
 
 # 3. Determine which file to load
 load_path = None
