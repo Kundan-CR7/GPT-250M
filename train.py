@@ -131,6 +131,9 @@ def generate_sample(model, device, prompt="The ", max_new_tokens=30):
     
     # CRITICAL: Switch back to training mode so dropout turns back on!
     model.train()
+    del x, tokens, logits, probs, next_token
+    gc.collect()
+    torch.cuda.empty_cache()
 
 # ==========================================
 # 5. The Training Loop

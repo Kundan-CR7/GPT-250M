@@ -167,6 +167,9 @@ def generate_sample(model, device, prompt="The ", max_new_tokens=30):
     print(f"Output: {output_text}")
     print("----------------------------\n")
     model.train()
+    del x, tokens, logits, probs, next_token
+    gc.collect()
+    torch.cuda.empty_cache()
 
 # ==========================================
 # 7. The Distributed Training Loop
