@@ -92,12 +92,18 @@ if os.path.exists(checkpoint_path):
 else:
     print("No checkpoint found in Drive. Starting training from scratch!")
 
+
 # ==========================================
 # 4.5 Evaluation Sampling Function
 # ==========================================
 def generate_sample(model, device, prompt="The ", max_new_tokens=30):
     # Switch to evaluation mode
     model.eval()
+    
+    # 🧹 FREE UP FRAGMENTED VRAM BEFORE GENERATING
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
     
     enc = tiktoken.get_encoding("gpt2")
     tokens = enc.encode(prompt)
@@ -107,15 +113,17 @@ def generate_sample(model, device, prompt="The ", max_new_tokens=30):
     print(f"Prompt: '{prompt}'")
     
     with torch.no_grad():
-        for _ in range(max_new_tokens):
-            x_cond = x[:, -config.block_size:]
-            logits = model(x_cond)
-            logits = logits[:, -1, :] 
-            
-            # Use a slightly lower temperature during training to see the most likely words
-            probs = F.softmax(logits / 0.8, dim=-1) 
-            next_token = torch.multinomial(probs, num_samples=1)
-            x = torch.cat((x, next_token), dim=1)
+        # ⚡ THE FIX: Use FP16 autocast during generation just like training!
+        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+            for _ in range(max_new_tokens):
+                x_cond = x[:, -config.block_size:]
+                logits = model(x_cond)
+                logits = logits[:, -1, :] 
+                
+                # Use a slightly lower temperature during training to see the most likely words
+                probs = F.softmax(logits / 0.8, dim=-1) 
+                next_token = torch.multinomial(probs, num_samples=1)
+                x = torch.cat((x, next_token), dim=1)
             
     output_text = enc.decode(x[0].tolist())
     print(f"Output: {output_text}")

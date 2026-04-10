@@ -53,7 +53,7 @@ assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
 gradient_accumulation_steps = target_batch_size // (micro_batch_size * ddp_world_size)
 
 # Update this path to your Kaggle dataset input!
-data_path = "/kaggle/input/datasets/kundan8918/trainbin/train.bin" 
+data_path = "/kaggle/input/gpt-250m-training-data/train.bin"
 
 if master_process:
     print("Initializing dataset...")
@@ -88,19 +88,32 @@ cosine_scheduler = CosineAnnealingLR(optimizer, T_max=(max_steps-warmup_steps), 
 scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
 # ==========================================
-# 5. Checkpointing Setup (Kaggle Working Dir)
+# 5. Checkpointing Setup (Kaggle)
 # ==========================================
 drive_path = "/kaggle/working/checkpoints"
 if master_process:
     os.makedirs(drive_path, exist_ok=True)
 
-checkpoint_path = os.path.join(drive_path, "latest_step_model.pth")
+# 1. Where we save NEW checkpoints (Read/Write)
+working_checkpoint = os.path.join(drive_path, "latest_step_model.pth")
+
+# 2. Where we load your UPLOADED checkpoint from (Read-Only)
+# ⚠️ This path must exactly match where your uploaded dataset is!
+input_checkpoint = "/kaggle/input/gpt-250m-training-data/latest_step_model.pth"
+
+# 3. Determine which file to load
+load_path = None
+if os.path.exists(working_checkpoint):
+    load_path = working_checkpoint      # Resume from a crash in THIS Kaggle session
+elif os.path.exists(input_checkpoint):
+    load_path = input_checkpoint        # Resume from your uploaded Google Drive checkpoint
+
 best_loss = float('inf')
 
-if os.path.exists(checkpoint_path):
+if load_path:
     if master_process:
-        print(f"Loading checkpoint from: {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        print(f"Loading checkpoint from: {load_path}...")
+    checkpoint = torch.load(load_path, map_location="cpu")
     
     raw_model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -128,6 +141,11 @@ else:
 # ==========================================
 def generate_sample(model, device, prompt="The ", max_new_tokens=30):
     model.eval()
+    
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+
     enc = tiktoken.get_encoding("gpt2")
     tokens = enc.encode(prompt)
     x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
@@ -136,13 +154,14 @@ def generate_sample(model, device, prompt="The ", max_new_tokens=30):
     print(f"Prompt: '{prompt}'")
     
     with torch.no_grad():
-        for _ in range(max_new_tokens):
-            x_cond = x[:, -config.block_size:]
-            logits = model(x_cond)
-            logits = logits[:, -1, :] 
-            probs = F.softmax(logits / 0.8, dim=-1) 
-            next_token = torch.multinomial(probs, num_samples=1)
-            x = torch.cat((x, next_token), dim=1)
+        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+            for _ in range(max_new_tokens):
+                x_cond = x[:, -config.block_size:]
+                logits = model(x_cond)
+                logits = logits[:, -1, :] 
+                probs = F.softmax(logits / 0.8, dim=-1) 
+                next_token = torch.multinomial(probs, num_samples=1)
+                x = torch.cat((x, next_token), dim=1)
             
     output_text = enc.decode(x[0].tolist())
     print(f"Output: {output_text}")
