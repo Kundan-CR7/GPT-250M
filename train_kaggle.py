@@ -2,13 +2,12 @@ import os
 import time
 import torch
 import torch.nn.functional as F
-# Removed heavy PyTorch DataLoaders to prevent SIGKILL (-9) RAM crashes
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import tiktoken
 
-# Import our custom modules (Ensure these files are also uploaded/written to Kaggle working dir)
+# Import our custom modules
 from config import GPTConfig
 from dataset import GPTDataset
 from model import GPT
@@ -16,7 +15,6 @@ from model import GPT
 # ==========================================
 # 1. DDP Initialization & Hardware Setup
 # ==========================================
-# Check if we are running under torchrun
 ddp = int(os.environ.get('RANK', -1)) != -1
 
 if ddp:
@@ -26,9 +24,8 @@ if ddp:
     ddp_world_size = int(os.environ['WORLD_SIZE'])
     device = f'cuda:{ddp_local_rank}'
     torch.cuda.set_device(device)
-    master_process = ddp_rank == 0 # Only GPU 0 prints, saves, and evaluates
+    master_process = ddp_rank == 0
 else:
-    # Fallback for single GPU
     ddp_rank = 0
     ddp_local_rank = 0
     ddp_world_size = 1
@@ -43,9 +40,6 @@ if master_process:
 # ==========================================
 config = GPTConfig()
 
-# ⚡ DDP MATH: Target is 32. 
-# 2 GPUs * 8 micro_batch = 16 sequences per forward pass.
-# 32 / 16 = 2 gradient accumulation steps
 target_batch_size = 36
 micro_batch_size = 6
 assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
@@ -59,19 +53,13 @@ if master_process:
 train_dataset = GPTDataset(data_path=data_path, block_size=config.block_size)
 
 # ==========================================
-# 3. Model Setup & DDP Wrapping
+# 3. Model Setup (NO DDP YET!)
 # ==========================================
 model = GPT(config)
 model.to(device)
 
-if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
-    
-# When saving checkpoints, we must pull the raw model out of the DDP wrapper
-raw_model = model.module if ddp else model
-
 # ==========================================
-# 4. Optimization Setup
+# 4. Optimization Setup (Bound to base model)
 # ==========================================
 start_step = 0
 max_steps = 610352
@@ -81,30 +69,26 @@ scaler = torch.amp.GradScaler('cuda')
 learning_rate = 5e-4
 warmup_steps = 10000
 
-optimizer = torch.optim.AdamW(raw_model.parameters(), lr=learning_rate, betas=(0.9, 0.95))
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, betas=(0.9, 0.95))
 warmup_scheduler = LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps)
 cosine_scheduler = CosineAnnealingLR(optimizer, T_max=(max_steps-warmup_steps), eta_min=1e-5)
 scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
 # ==========================================
-# 5. Checkpointing Setup (Kaggle)
+# 5. Checkpointing Setup & Loading
 # ==========================================
 drive_path = "/kaggle/working/checkpoints"
 if master_process:
     os.makedirs(drive_path, exist_ok=True)
 
-# 1. Where we save NEW checkpoints (Read/Write)
 working_checkpoint = os.path.join(drive_path, "latest_step_model.pth")
-
-# 2. Where we load your UPLOADED checkpoint from (Read-Only)
 input_checkpoint = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_step_model.pth"
 
-# 3. Determine which file to load
 load_path = None
 if os.path.exists(working_checkpoint):
-    load_path = working_checkpoint      # Resume from a crash in THIS Kaggle session
+    load_path = working_checkpoint      
 elif os.path.exists(input_checkpoint):
-    load_path = input_checkpoint        # Resume from your uploaded Google Drive checkpoint
+    load_path = input_checkpoint        
 
 best_loss = float('inf')
 
@@ -113,7 +97,8 @@ if load_path:
         print(f"Loading checkpoint from: {load_path}...")
     checkpoint = torch.load(load_path, map_location="cpu")
     
-    raw_model.load_state_dict(checkpoint["model_state_dict"])
+    # ⚡ LOAD WEIGHTS INTO THE BASE MODEL FIRST
+    model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
@@ -133,6 +118,14 @@ if load_path:
 else:
     if master_process:
         print("No checkpoint found. Starting training from scratch!")
+
+# ==========================================
+# 5.5 Wrap in DDP (The Final Step)
+# ==========================================
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
+    
+raw_model = model.module if ddp else model
 
 # ==========================================
 # 6. Evaluation Sampling Function
@@ -174,32 +167,32 @@ def generate_sample(model, device, prompt="The ", max_new_tokens=30):
 # ==========================================
 model.train()
 
-# 💥 THE FIX: A RAM-Free Custom Generator to replace PyTorch's heavy DataLoader
-def create_batch_generator(dataset, micro_batch_size, ddp_world_size, ddp_rank, start_step):
-    current_global_idx = start_step * (micro_batch_size * ddp_world_size)
+# 💥 THE FIX V3: True Random Sampling (With perfect Resume Support)
+def create_batch_generator(dataset, micro_batch_size, ddp_rank, start_step, seed=42):
+    g = torch.Generator()
+    
+    # By adding start_step to the seed, if we crash and resume at Step 44,000, 
+    # the generator produces brand NEW random numbers instead of repeating!
+    g.manual_seed(seed + ddp_rank + start_step) 
+    
+    max_idx = len(dataset)
     
     while True:
-        rank_start_idx = current_global_idx + (ddp_rank * micro_batch_size)
-        
         x_batch, y_batch = [], []
-        for i in range(micro_batch_size):
-            idx = rank_start_idx + i
-            if idx >= len(dataset):
-                idx = idx % len(dataset) # Wrap around safely if we hit the end of the file
-            
+        indices = torch.randint(0, max_idx, (micro_batch_size,), generator=g).tolist()
+        
+        for idx in indices:
             x, y = dataset[idx]
             x_batch.append(x)
             y_batch.append(y)
             
         yield torch.stack(x_batch), torch.stack(y_batch)
-        
-        # Advance the global index for the next step
-        current_global_idx += (micro_batch_size * ddp_world_size)
 
 if master_process:
-    print("Initializing RAM-free batch generator...")
+    print("Initializing True-Random RAM-free batch generator...")
 
-train_iter = create_batch_generator(train_dataset, micro_batch_size, ddp_world_size, ddp_rank, start_step)
+# Initialize passing the start_step!
+train_iter = create_batch_generator(train_dataset, micro_batch_size, ddp_rank, start_step)
 
 optimizer.zero_grad(set_to_none=True)
 t0 = time.time()
@@ -259,7 +252,8 @@ for step in range(start_step, max_steps):
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_loss": best_loss if 'best_loss' in locals() else real_loss
             }
-            if step >= 400 and real_loss < best_loss:
+            # Threshold raised to 4.5 so it captures the new, legitimate training curve
+            if step >= 400 and real_loss < best_loss and real_loss < 4.5:
                 best_loss = real_loss
                 best_path = os.path.join(drive_path, "best_model.pth")
                 torch.save(checkpoint, best_path)
