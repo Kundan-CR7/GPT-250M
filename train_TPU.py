@@ -227,4 +227,4 @@ def train_tpu(index):
 # ==========================================
 if __name__ == '__main__':
     # Spawns 8 processes automatically for the v5e-8!
-    xmp.spawn(train_tpu, args=(), nprocs=8, start_method='fork')
+    xmp.spawn(train_tpu, args=(), nprocs=None, start_method='fork')
