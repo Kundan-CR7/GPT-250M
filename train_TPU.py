@@ -9,7 +9,9 @@ def get_kaggle_tpu_address():
     url = "http://metadata.google.internal/computeMetadata/v1/instance/attributes/TPU_PROCESS_ADDRESSES"
     try:
         r = requests.get(url, headers={"Metadata-Flavor": "Google"}, timeout=5)
-        return r.text
+        if r.status_code == 200 and r.text and r.text != 'None':
+            return r.text
+        return None
     except Exception:
         return None
 
@@ -20,7 +22,6 @@ if tpu_addr and len(tpu_addr.split(',')) == 8:
     os.environ['TPU_PROCESS_ADDRESSES'] = tpu_addr
     print(f"✅ TPU addresses fetched from metadata: {tpu_addr}")
 else:
-    # Fallback: hardcoded localhost ports for Kaggle TPU v3-8
     fallback = (
         'localhost:8476,localhost:8477,localhost:8478,localhost:8479,'
         'localhost:8480,localhost:8481,localhost:8482,localhost:8483'
@@ -32,9 +33,6 @@ os.environ['CLOUD_TPU_TASK_ID']            = '0'
 os.environ['TPU_CHIPS_PER_PROCESS_BOUNDS'] = '2,2,1'
 os.environ['TPU_PROCESS_BOUNDS']           = '1,1,1'
 os.environ['PJRT_DEVICE']                  = 'TPU'
-
-# BF16: XLA_USE_BF16 is deprecated in torch_xla 2.6+
-# We will cast the model manually instead (done below in train_fn)
 
 import time
 import torch
@@ -74,19 +72,26 @@ def create_batch_generator(dataset, micro_batch_size, rank, start_step, seed=42)
 def train_fn(index, config):
 
     # ── TPU / distributed setup ───────────────────────────────────────────────
-    device       = xm.xla_device()
-    world_size   = xr.world_size()
-    rank         = xr.global_ordinal()
+    device         = xm.xla_device()
+    world_size     = xr.world_size()
+    rank           = xr.global_ordinal()
     master_process = (rank == 0)
 
     if master_process:
         print(f"🚀 Training started | Cores: {world_size} | Device: {device}")
 
     # ── Batch / accumulation config ───────────────────────────────────────────
-    micro_batch_size          = 6
-    target_batch_size         = micro_batch_size * world_size * 10   # 10 accum steps
-    gradient_accumulation_steps = target_batch_size // (micro_batch_size * world_size)
-    # = 10 regardless of world_size
+    # Target: effective batch of 480 sequences regardless of core count.
+    # With 8 cores: micro=6, accum=10  → 6*8*10 = 480  ✅
+    # With 1 core:  micro=1, accum=60  → 1*1*60 = 60   (reduced but won't OOM)
+    target_effective_batch      = 480
+    micro_batch_size            = max(1, 6 * world_size // 8)   # scales with cores
+    gradient_accumulation_steps = max(1, target_effective_batch // (micro_batch_size * world_size))
+
+    if master_process:
+        effective = micro_batch_size * world_size * gradient_accumulation_steps
+        print(f"   micro_batch={micro_batch_size} | grad_accum={gradient_accumulation_steps} "
+              f"| effective_batch={effective}")
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     data_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"
@@ -94,8 +99,13 @@ def train_fn(index, config):
         print("Loading dataset...")
     train_dataset = GPTDataset(data_path=data_path, block_size=config.block_size)
 
-    # ── Model (cast to bf16 manually — XLA_USE_BF16 is deprecated) ───────────
+    # ── Model ─────────────────────────────────────────────────────────────────
+    # Cast to bfloat16 manually (XLA_USE_BF16 env var is deprecated in 2.6+)
     model = GPT(config).to(torch.bfloat16).to(device)
+
+    if master_process:
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"   Model parameters: {total_params / 1e6:.1f}M")
 
     # ── Optimiser & schedulers ────────────────────────────────────────────────
     start_step    = 0
@@ -104,7 +114,7 @@ def train_fn(index, config):
     warmup_steps  = 10000
 
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=learning_rate, betas=(0.9, 0.95)
+        model.parameters(), lr=learning_rate, betas=(0.9, 0.95), weight_decay=0.1
     )
     warmup_scheduler = LinearLR(
         optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
@@ -135,20 +145,22 @@ def train_fn(index, config):
 
     if load_path:
         if master_process:
-            print(f"📂 Loading checkpoint from: {load_path}")
+            print(f"📂 Loading checkpoint: {load_path}")
 
         checkpoint = torch.load(load_path, map_location="cpu")
 
+        # Model weights
         model.load_state_dict(checkpoint["model_state_dict"])
 
-        # Optimizer state may be incompatible if model architecture changed
+        # Optimizer state — skip gracefully if architecture changed
         try:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        except ValueError as e:
+        except (ValueError, KeyError) as e:
             if master_process:
                 print(f"⚠️  Optimizer state skipped (architecture changed): {e}")
                 print("   Continuing with a fresh optimizer.")
 
+        # Scheduler state
         if "scheduler_state_dict" in checkpoint:
             try:
                 scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -160,7 +172,7 @@ def train_fn(index, config):
         best_loss  = checkpoint.get("best_loss", float("inf"))
 
         if master_process:
-            print(f"✅ Resumed from step {start_step} | best_loss so far: {best_loss:.4f}")
+            print(f"✅ Resumed from step {start_step} | best_loss: {best_loss:.4f}")
 
         del checkpoint
 
@@ -176,19 +188,19 @@ def train_fn(index, config):
 
     for step in range(start_step, max_steps):
 
+        # Forward pass
         x, y = next(train_iter)
         x, y = x.to(device), y.to(device)
 
-        # Forward
         logits = model(x)
         B, T, C = logits.shape
         loss = F.cross_entropy(logits.view(B * T, C), y.view(B * T))
         loss = loss / gradient_accumulation_steps
 
-        # Backward
+        # Backward pass
         loss.backward()
 
-        # Optimizer step — keyed on position within the accumulation window
+        # Optimizer step — position within accumulation window,
         # so resuming mid-window never skips or double-applies an update
         steps_since_start = step - start_step + 1
         if steps_since_start % gradient_accumulation_steps == 0:
@@ -197,11 +209,13 @@ def train_fn(index, config):
             optimizer.zero_grad()
             scheduler.step()
 
-        # Logging (master only, every 10 steps)
+        # ── Logging (master only, every 10 steps) ─────────────────────────────
         if master_process and step % 10 == 0:
+            # loss.item() forces a device→host sync; keep it inside the log gate
             real_loss = loss.item() * gradient_accumulation_steps
             t1 = time.time()
-            tokens_per_sec = (10 * target_batch_size * config.block_size) / (t1 - t0)
+            effective_batch = micro_batch_size * world_size * gradient_accumulation_steps
+            tokens_per_sec  = (10 * effective_batch * config.block_size) / (t1 - t0)
             print(
                 f"Step {step:6d} | Loss: {real_loss:.4f} "
                 f"| LR: {scheduler.get_last_lr()[0]:.2e} "
@@ -209,9 +223,10 @@ def train_fn(index, config):
             )
             t0 = time.time()
 
-        # Checkpoint (all ranks must call xm.save)
+        # ── Checkpoint (every 1000 steps) ─────────────────────────────────────
         if (step + 1) % 1000 == 0:
-            xm.rendezvous("checkpoint_sync")   # wait for all cores to finish
+            # Sync all cores before touching disk
+            xm.rendezvous("checkpoint_sync")
 
             current_loss = loss.item() * gradient_accumulation_steps
             if current_loss < best_loss:
@@ -226,7 +241,7 @@ def train_fn(index, config):
             }
             save_path = os.path.join(drive_path, "latest_step_model.pth")
 
-            # xm.save must be called by ALL ranks — do NOT gate on master_process
+            # xm.save MUST be called by ALL ranks — do not gate on master_process
             xm.save(checkpoint_data, save_path)
 
             if master_process:
@@ -239,5 +254,13 @@ def train_fn(index, config):
 if __name__ == "__main__":
     gpt_config = GPTConfig()
 
-    # No XLA calls here — xmp.spawn initialises each core cleanly
+    # Diagnostic: show how many TPU devices PJRT can see before spawning
+    try:
+        import torch_xla.runtime as xr
+        n = xr.addressable_device_count()
+        print(f"🔍 PJRT sees {n} TPU device(s) before spawn")
+    except Exception as e:
+        print(f"🔍 Device count check failed: {e}")
+
+    # No other XLA calls here — xmp.spawn initialises each core cleanly
     xmp.spawn(train_fn, args=(gpt_config,), start_method="spawn")
