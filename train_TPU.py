@@ -117,17 +117,16 @@ def train_tpu(index):
     # ==========================================
     # 6. Evaluation Sampling Function
     # ==========================================
-    def generate_sample(model, device, prompt="Tell me something about AI", max_new_tokens=70):
-        if not master_process: return 
-        
+    def generate_sample(model, device, master_process, prompt="Tell me something about AI", max_new_tokens=70):
+        # 💥 REMOVED the early return! ALL cores must run this to stay in sync!
         model.eval()
         enc = tiktoken.get_encoding("gpt2")
         tokens = enc.encode(prompt)
         x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
         
-        # Modern Python Print (Safe inside the if not master_process check)
-        print("\n--- 🧠 Model Brain Check ---")
-        print(f"Prompt: '{prompt}'")
+        if master_process:
+            print("\n--- 🧠 Model Brain Check ---")
+            print(f"Prompt: '{prompt}'")
         
         with torch.no_grad():
             for _ in range(max_new_tokens):
@@ -138,9 +137,11 @@ def train_tpu(index):
                 next_token = torch.multinomial(probs, num_samples=1)
                 x = torch.cat((x, next_token), dim=1)
                 
-        output_text = enc.decode(x[0].tolist())
-        print(f"Output: {output_text}")
-        print("----------------------------\n")
+        if master_process:
+            output_text = enc.decode(x[0].tolist())
+            print(f"Output: {output_text}")
+            print("----------------------------\n")
+            
         model.train()
 
     # ==========================================
@@ -193,9 +194,10 @@ def train_tpu(index):
         # ==========================================
         # 8. Logging and Checkpoint Saving
         # ==========================================
+        # 💥 TPU RULE 1: ALL 8 cores must evaluate .item() simultaneously to prevent deadlock!
+        real_loss = loss.item() * gradient_accumulation_steps
+        
         if master_process:
-            real_loss = loss.item() * gradient_accumulation_steps
-            
             if step % 10 == 0 and step > 0:
                 t1 = time.time()
                 dt = t1 - t0
@@ -203,26 +205,36 @@ def train_tpu(index):
                 print(f"Step {step:5d} | Loss: {real_loss:.4f} | Speed: {(tokens_processed / dt):.2f} tok/sec")
                 t0 = time.time() 
 
-            if require_backward_grad_sync:
-                checkpoint = {
-                    "step": step,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
-                    "best_loss": best_loss if 'best_loss' in locals() else real_loss
-                }
+        if require_backward_grad_sync:
+            # All cores build the dictionary
+            checkpoint = {
+                "step": step,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_loss": best_loss if 'best_loss' in locals() else real_loss
+            }
+            
+            # ALL cores must evaluate the save conditions
+            if step >= 400 and real_loss < best_loss and real_loss < 4.5:
+                best_loss = real_loss
+                best_path = os.path.join(drive_path, "best_model.pth")
                 
-                if step >= 400 and real_loss < best_loss and real_loss < 4.5:
-                    best_loss = real_loss
-                    best_path = os.path.join(drive_path, "best_model.pth")
-                    xm.save(checkpoint, best_path)
+                # 💥 TPU RULE 2: xm.save handles the master-only writing internally!
+                xm.save(checkpoint, best_path) 
+                
+                if master_process:
                     print(f"🌟 New Best Model! Saved to {best_path} (Loss: {best_loss:.4f})")
 
-                if (step + 1) % 1000 == 0:
-                    interval_path = os.path.join(drive_path, "latest_step_model.pth")
-                    xm.save(checkpoint, interval_path)
+            if (step + 1) % 1000 == 0:
+                interval_path = os.path.join(drive_path, "latest_step_model.pth")
+                xm.save(checkpoint, interval_path) # ALL cores sync and save
+                
+                if master_process:
                     print(f"💾 Interval Backup! Saved step {step} to Kaggle Dir.")
-                    generate_sample(model, device)
+                
+                # ALL cores run generate_sample to keep XLA graphs mathematically synced
+                generate_sample(model, device, master_process)
 
 # ==========================================
 # The TPU Launch Trigger
