@@ -166,7 +166,8 @@ def train_fn(index, config):
 if __name__ == '__main__':
     # Initialize the config here
     gpt_config = GPTConfig()
-    
+    import torch_xla.runtime as xr
+    xr.set_device_type('TPU')
     # xmp.spawn using 'spawn' method (explicitly provided via nprocs)
     # nprocs=8 for Kaggle TPU v3-8
     xmp.spawn(train_fn, args=(gpt_config,), nprocs=None, start_method='spawn')
