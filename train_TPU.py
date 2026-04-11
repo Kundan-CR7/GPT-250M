@@ -43,8 +43,8 @@ def train_tpu(index):
     # ==========================================
     config = GPTConfig()
 
-    # Note: Ensure this batch size fits in your 15.75GB TPU core limit!
-    micro_batch_size = 32
+    # 💥 THE FIX: Dropped back to the safe 16GB limit!
+    micro_batch_size = 4
 
     data_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"
 
@@ -63,7 +63,8 @@ def train_tpu(index):
     # ==========================================
     # 4. Optimization Setup
     # ==========================================
-    max_steps = 17245
+    # 💥 THE FIX: Absolute finish line for the dataset
+    global_max_steps = 228880
     learning_rate = 2e-4
     warmup_steps = 500
 
@@ -78,9 +79,10 @@ def train_tpu(index):
         end_factor=1.0,
         total_iters=warmup_steps
     )
+    # 💥 THE FIX: Adjusted to use global_max_steps
     cosine_scheduler = CosineAnnealingLR(
         optimizer,
-        T_max=(max_steps - warmup_steps),
+        T_max=(global_max_steps - warmup_steps),
         eta_min=1e-5
     )
     scheduler = SequentialLR(
@@ -200,11 +202,15 @@ def train_tpu(index):
     optimizer.zero_grad()
     t0 = time.time()
 
-    if master_process:
-        print(f"Starting TPU loop for {max_steps} session steps...")
+    # 💥 THE FIX: Calculate exactly how many steps are left to run today
+    session_steps_remaining = global_max_steps - resumed_from
 
-    # The loop always runs from 0 to max_steps for THIS session
-    for current_step in range(max_steps):
+    if master_process:
+        print(f"Total target: {global_max_steps} | Already completed: {resumed_from}")
+        print(f"Starting TPU loop for the remaining {session_steps_remaining} steps...")
+
+    # 💥 THE FIX: The loop only runs the remaining distance!
+    for current_step in range(session_steps_remaining):
         
         # Calculate the true historical step for saving
         cumulative_step = resumed_from + current_step + 1
@@ -242,7 +248,8 @@ def train_tpu(index):
                     )
                     tok_per_sec = tokens_processed / dt
                     print(
-                        f"Step {current_step:5d}/{max_steps} (historical: {cumulative_step}) | "
+                        # 💥 THE FIX: Show progress relative to the global finish line
+                        f"Step {current_step:5d}/{session_steps_remaining} (historical: {cumulative_step}/{global_max_steps}) | "
                         f"Loss: {real_loss:.4f} | "
                         f"Speed: {tok_per_sec:.2f} tok/sec"
                     )
