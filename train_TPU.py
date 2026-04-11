@@ -1,6 +1,10 @@
 import os
 
 # ✅ CRITICAL: Must be set before ANY torch_xla import
+os.environ['CLOUD_TPU_TASK_ID'] = '0'
+os.environ['TPU_PROCESS_ADDRESSES'] = 'localhost:8476,localhost:8477,localhost:8478,localhost:8479,localhost:8480,localhost:8481,localhost:8482,localhost:8483'
+os.environ['TPU_CHIPS_PER_PROCESS_BOUNDS'] = '2,2,1'
+os.environ['TPU_PROCESS_BOUNDS'] = '1,1,1'
 os.environ['PJRT_DEVICE'] = 'TPU'
 os.environ['XLA_USE_BF16'] = '1'
 
