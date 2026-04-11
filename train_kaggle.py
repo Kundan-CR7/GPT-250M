@@ -87,10 +87,10 @@ input_checkpoint = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/lat
 # 💥 FORCE A CLEAN START: Hardcode to None and comment out the checks!
 load_path = None
 
-# if os.path.exists(working_checkpoint):
-#     load_path = working_checkpoint      
-# elif os.path.exists(input_checkpoint):
-#     load_path = input_checkpoint        
+if os.path.exists(working_checkpoint):
+    load_path = working_checkpoint      
+elif os.path.exists(input_checkpoint):
+    load_path = input_checkpoint        
 
 best_loss = float('inf')
 
