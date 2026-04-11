@@ -156,7 +156,7 @@ def train_tpu(index):
     # ==========================================
     # 9. Text generation for sanity-checking
     # ==========================================
-    def generate_sample(prompt="Tell me something about AI", max_new_tokens=70):
+    def generate_sample(prompt="Tell me something about AI", max_new_tokens=30):
         model.eval()
         enc    = tiktoken.get_encoding("gpt2")
         tokens = enc.encode(prompt)
@@ -243,8 +243,8 @@ def train_tpu(index):
                     )
                 t0 = time.time()
 
-        # -- checkpoint every 500 steps --
-        if (step + 1) % 500 == 0:
+        # -- checkpoint every 1000 steps --
+        if (step + 1) % 1000 == 0:
             xm.rendezvous("pre_save")
 
             # Fetch loss if we are not on a logging step
