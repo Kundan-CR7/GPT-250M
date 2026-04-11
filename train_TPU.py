@@ -40,11 +40,9 @@ def train_tpu(index):
     # ==========================================
     config = GPTConfig()
 
-    # Unleashing the 128GB TPU
-    target_batch_size = 256
-    micro_batch_size = 8
-    assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
-    gradient_accumulation_steps = target_batch_size // (micro_batch_size * ddp_world_size)
+    # 💥 NO MORE GRADIENT ACCUMULATION!
+    # We use all 128GB of RAM to process the batch in one massive shot.
+    micro_batch_size = 16 
 
     data_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"
 
@@ -52,11 +50,13 @@ def train_tpu(index):
         print("Initializing dataset...")
     train_dataset = GPTDataset(data_path=data_path, block_size=config.block_size)
 
+    # ... (Model Setup stays the same) ...
+
     # ==========================================
-    # 3. Model Setup
+    # 4. Optimization Setup
     # ==========================================
-    model = GPT(config)
-    model.to(device)
+    start_step = 0
+    max_steps = 57220 # 💥 Adjusted for the massive 128-sequence ingestion rate!
 
     # ==========================================
     # 4. Optimization Setup
@@ -144,69 +144,66 @@ def train_tpu(index):
             
         model.train()
 
-    # ==========================================
-    # 7. The Distributed Training Loop
-    # ==========================================
-    model.train()
+        # ==========================================
+        # 7. The Distributed Training Loop
+        # ==========================================
+        model.train()
 
-    def create_batch_generator(dataset, micro_batch_size, ddp_rank, start_step, seed=42):
-        g = torch.Generator()
-        g.manual_seed(seed + ddp_rank + start_step) 
-        max_idx = len(dataset)
-        
-        while True:
-            x_batch, y_batch = [], []
-            indices = torch.randint(0, max_idx, (micro_batch_size,), generator=g).tolist()
-            for idx in indices:
-                x, y = dataset[idx]
-                x_batch.append(x)
-                y_batch.append(y)
-            yield torch.stack(x_batch), torch.stack(y_batch)
+        def create_batch_generator(dataset, micro_batch_size, ddp_rank, start_step, seed=42):
+            g = torch.Generator()
+            g.manual_seed(seed + ddp_rank + start_step) 
+            max_idx = len(dataset)
+            
+            while True:
+                x_batch, y_batch = [], []
+                indices = torch.randint(0, max_idx, (micro_batch_size,), generator=g).tolist()
+                for idx in indices:
+                    x, y = dataset[idx]
+                    x_batch.append(x)
+                    y_batch.append(y)
+                yield torch.stack(x_batch), torch.stack(y_batch)
 
-    train_iter = create_batch_generator(train_dataset, micro_batch_size, ddp_rank, start_step)
-    optimizer.zero_grad(set_to_none=True)
-    t0 = time.time()
+        train_iter = create_batch_generator(train_dataset, micro_batch_size, ddp_rank, start_step)
+        optimizer.zero_grad(set_to_none=True)
+        t0 = time.time()
 
-    if master_process:
-        print("Starting TPU distributed training loop...")
+        if master_process:
+            print("Starting TPU distributed training loop...")
 
-    for step in range(start_step, max_steps):
-        x, y = next(train_iter)
-        x, y = x.to(device), y.to(device)
+        for step in range(start_step, max_steps):
+            x, y = next(train_iter)
+            x, y = x.to(device), y.to(device)
 
-        require_backward_grad_sync = (step + 1) % gradient_accumulation_steps == 0
+            # 💥 TPU bfloat16 Context Manager
+            with torch.autocast('xla', dtype=torch.bfloat16):
+                logits = model(x)
+                B, T, C = logits.shape
+                loss = F.cross_entropy(logits.view(B * T, C), y.view(B * T))
 
-        # TPU bfloat16 Context Manager
-        with torch.autocast('xla', dtype=torch.bfloat16):
-            logits = model(x)
-            B, T, C = logits.shape
-            loss = F.cross_entropy(logits.view(B * T, C), y.view(B * T))
-            loss = loss / gradient_accumulation_steps
-
-        loss.backward()
-        
-        if require_backward_grad_sync:
+            # 💥 CLEAN ONE-SHOT STEP (No accumulation memory explosions)
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            # optimizer_step internally forces the TPU to compile and clear the graph!
             xm.optimizer_step(optimizer)
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
 
-        # ==========================================
-        # 8. Logging and Checkpoint Saving
-        # ==========================================
-        # 💥 TPU RULE 1: ALL 8 cores must evaluate .item() simultaneously to prevent deadlock!
-        real_loss = loss.item() * gradient_accumulation_steps
-        
-        if master_process:
-            if step % 10 == 0 and step > 0:
-                t1 = time.time()
-                dt = t1 - t0
-                tokens_processed = 10 * (micro_batch_size * ddp_world_size) * config.block_size
-                print(f"Step {step:5d} | Loss: {real_loss:.4f} | Speed: {(tokens_processed / dt):.2f} tok/sec")
-                t0 = time.time() 
+            # ==========================================
+            # 8. Logging and Checkpoint Saving
+            # ==========================================
+            # All 8 cores evaluate the scalar safely to stay in sync
+            real_loss = loss.detach().item() 
+            
+            if master_process:
+                if step % 10 == 0 and step > 0:
+                    t1 = time.time()
+                    dt = t1 - t0
+                    tokens_processed = 10 * (micro_batch_size * ddp_world_size) * config.block_size
+                    print(f"Step {step:5d} | Loss: {real_loss:.4f} | Speed: {(tokens_processed / dt):.2f} tok/sec")
+                    t0 = time.time() 
 
-        if require_backward_grad_sync:
-            # All cores build the dictionary
+            # ALL cores build the dictionary to stay mathematically synced
             checkpoint = {
                 "step": step,
                 "model_state_dict": model.state_dict(),
@@ -215,30 +212,27 @@ def train_tpu(index):
                 "best_loss": best_loss if 'best_loss' in locals() else real_loss
             }
             
-            # ALL cores must evaluate the save conditions
+            # ALL cores evaluate save conditions
             if step >= 400 and real_loss < best_loss and real_loss < 4.5:
                 best_loss = real_loss
                 best_path = os.path.join(drive_path, "best_model.pth")
-                
-                # 💥 TPU RULE 2: xm.save handles the master-only writing internally!
-                xm.save(checkpoint, best_path) 
+                xm.save(checkpoint, best_path) # xm.save naturally protects against multi-write corruption
                 
                 if master_process:
                     print(f"🌟 New Best Model! Saved to {best_path} (Loss: {best_loss:.4f})")
 
             if (step + 1) % 1000 == 0:
                 interval_path = os.path.join(drive_path, "latest_step_model.pth")
-                xm.save(checkpoint, interval_path) # ALL cores sync and save
+                xm.save(checkpoint, interval_path)
                 
                 if master_process:
                     print(f"💾 Interval Backup! Saved step {step} to Kaggle Dir.")
                 
-                # ALL cores run generate_sample to keep XLA graphs mathematically synced
-                generate_sample(model, device, master_process)
+                # ALL cores must generate sample to prevent XLA divergence!
+                generate_sample(model, device)
 
 # ==========================================
 # The TPU Launch Trigger
 # ==========================================
 if __name__ == '__main__':
-    # Spawns 8 processes automatically for the v5e-8!
     xmp.spawn(train_tpu, args=(), nprocs=None, start_method='fork')
