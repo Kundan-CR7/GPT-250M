@@ -47,9 +47,10 @@ def create_batch_generator(dataset, micro_batch_size, rank, start_step, seed=42)
 def train_fn(index, config):
     # TPU Setup
     device = xm.xla_device()
-    world_size = xm.xrt_world_size()
-    rank = xm.get_ordinal()
-    master_process = xm.is_master_ordinal()
+    import torch_xla.runtime as xr
+    world_size = xr.world_size()
+    rank = xr.global_ordinal()
+    master_process = (rank == 0)
 
     if master_process:
         print(f"🚀 Training initiated on TPU VM | Cores: {world_size}")
