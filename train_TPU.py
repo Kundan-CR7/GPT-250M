@@ -96,10 +96,10 @@ def train_tpu(index):
         checkpoint = torch.load(load_path, map_location="cpu")
         
         model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        # optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         
-        if "scheduler_state_dict" in checkpoint:
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        # if "scheduler_state_dict" in checkpoint:
+        #     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         
         start_step = checkpoint["step"] + 1
         best_loss = checkpoint.get("best_loss", float('inf'))
