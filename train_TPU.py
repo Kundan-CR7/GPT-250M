@@ -164,6 +164,7 @@ def train_fn(index, config):
 # 3. Entry Point
 # ==========================================
 if __name__ == '__main__':
+    os.environ['TPU_PROCESS_ADDRESSES'] = 'local'
     gpt_config = GPTConfig()
 
     # --- 🛠️ THE FIX FOR "EXPECTED 8, GOT 1" ---
