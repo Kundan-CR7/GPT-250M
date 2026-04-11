@@ -46,8 +46,8 @@ def train_tpu(index):
 
     max_steps    = 152_587
     warmup_steps = 7_629        # 5% of max_steps
-    max_lr       = 6e-4
-    min_lr       = 6e-5
+    max_lr       = 3e-4
+    min_lr       = 3e-5
     weight_decay = 0.1
     grad_clip    = 1.0
 
@@ -112,7 +112,6 @@ def train_tpu(index):
     # 7. Resume logic
     # ==========================================
     start_step = 0
-    best_loss  = float("inf")
 
     if os.path.exists(latest_ckpt):
         if is_master:
@@ -126,14 +125,13 @@ def train_tpu(index):
             scheduler.load_state_dict(ckpt["scheduler_state_dict"])
 
         start_step = ckpt.get("step", 0) + 1
-        best_loss  = ckpt.get("best_loss", float("inf"))
         del ckpt
 
         import gc
         gc.collect()
 
         if is_master:
-            print(f"Resumed at step {start_step} | best_loss: {best_loss:.4f}")
+            print(f"Resumed successfully at step {start_step}")
     else:
         if is_master:
             print("No checkpoint found — training from scratch.")
@@ -169,7 +167,7 @@ def train_tpu(index):
         with torch.no_grad():
             for _ in range(max_new_tokens):
                 sl   = x.size(1)
-                # FIX 1: safe slice — avoids TPU out-of-bounds on short sequences
+                # safe slice — avoids TPU out-of-bounds on short sequences
                 cond     = x[:, max(0, sl - config.block_size):]
                 logits   = model(cond)
                 logits   = logits[:, -1, :]
@@ -191,8 +189,6 @@ def train_tpu(index):
     data_iter = batch_generator(train_dataset, micro_batch_size, ddp_rank, start_step)
     optimizer.zero_grad()
 
-    # FIX 2: loss_val must exist before the checkpoint block can reference it.
-    # Initialise here so it is always defined even at step 0.
     loss_val = float("inf")
 
     t0 = time.time()
@@ -218,16 +214,16 @@ def train_tpu(index):
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
         xm.optimizer_step(optimizer)
-        optimizer.zero_grad(set_to_none=True)
+        
+        # FIX: standard zero_grad to keep TPU memory pointers static
+        optimizer.zero_grad()
         scheduler.step()
 
-        # FIX 3: mark_step AFTER scheduler.step() so the full graph
-        # (forward + backward + optimizer + scheduler) executes atomically.
+        # mark_step AFTER scheduler.step()
         xm.mark_step()
 
         # -- logging every 10 steps --
         if step % 10 == 0:
-            # .item() syncs the TPU value to Python — safe after mark_step
             loss_val = loss.detach().item()
             cur_lr   = scheduler.get_last_lr()[0]
 
@@ -247,27 +243,21 @@ def train_tpu(index):
         if (step + 1) % 1000 == 0:
             xm.rendezvous("pre_save")
 
-            # Fetch loss if we are not on a logging step
             if (step % 10) != 0:
                 loss_val = loss.detach().item()
-
-            if loss_val < best_loss:
-                best_loss = loss_val
 
             ckpt = {
                 "step":                 step,
                 "model_state_dict":     model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
-                "best_loss":            best_loss,
             }
-
-            interval_path = os.path.join(ckpt_dir, f"model_step_{step + 1}.pth")
-            xm.save(ckpt, interval_path)
+            
+            # This safely overwrites the exact same file every time
             xm.save(ckpt, latest_ckpt)
 
             if is_master:
-                print(f"Saved: {interval_path}  (best_loss={best_loss:.4f})")
+                print(f"💾 Overwrote latest_step_model.pth (Current Loss: {loss_val:.4f})")
 
             generate_sample()
 
