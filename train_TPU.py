@@ -1,12 +1,17 @@
 import os
-os.environ["PJRT_DEVICE"] = "TPU"
 import time
+
+# 💥 THE KAGGLE TPU BUG FIX: Force Single-Host Mode & Delete TF Variables
+os.environ["PJRT_DEVICE"] = "TPU"
+os.environ.pop("TPU_PROCESS_ADDRESSES", None)
+os.environ.pop("TPU_NAME", None)
+
 import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import tiktoken
 
-# 💥 NEW: PyTorch XLA Imports
+# PyTorch XLA Imports
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
 
@@ -16,11 +21,10 @@ from dataset import GPTDataset
 from model import GPT
 
 # ==========================================
-# 💥 NEW: The TPU Multiprocessing Wrapper
-# Everything must run inside this function!
+# 1. The TPU Multiprocessing Wrapper
 # ==========================================
 def train_tpu(index):
-    # 1. TPU Hardware Setup
+    # TPU Hardware Setup
     device = xm.xla_device()
     ddp_rank = xm.get_ordinal()
     ddp_world_size = xm.xrt_world_size()
@@ -34,7 +38,7 @@ def train_tpu(index):
     # ==========================================
     config = GPTConfig()
 
-    # NOTE: With 128GB of TPU memory, you can likely increase this target_batch_size massively later!
+    # Unleashing the 128GB TPU
     target_batch_size = 256
     micro_batch_size = 8
     assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
@@ -50,7 +54,7 @@ def train_tpu(index):
     # 3. Model Setup
     # ==========================================
     model = GPT(config)
-    model.to(device) # Sends to TPU core
+    model.to(device)
 
     # ==========================================
     # 4. Optimization Setup
@@ -58,7 +62,6 @@ def train_tpu(index):
     start_step = 0
     max_steps = 114440
     
-    # 💥 REMOVED GradScaler: TPUs use bfloat16 natively!
     learning_rate = 5e-4
     warmup_steps = 10000
 
@@ -113,7 +116,7 @@ def train_tpu(index):
     # 6. Evaluation Sampling Function
     # ==========================================
     def generate_sample(model, device, prompt="Tell me something about AI", max_new_tokens=70):
-        if not master_process: return # Only master prints
+        if not master_process: return 
         
         model.eval()
         enc = tiktoken.get_encoding("gpt2")
@@ -169,7 +172,7 @@ def train_tpu(index):
 
         require_backward_grad_sync = (step + 1) % gradient_accumulation_steps == 0
 
-        # 💥 TPU bfloat16 Context Manager
+        # TPU bfloat16 Context Manager
         with torch.autocast('xla', dtype=torch.bfloat16):
             logits = model(x)
             B, T, C = logits.shape
@@ -180,10 +183,7 @@ def train_tpu(index):
         
         if require_backward_grad_sync:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            # 💥 NEW: TPU Optimizer Step
             xm.optimizer_step(optimizer)
-            
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
 
@@ -212,19 +212,17 @@ def train_tpu(index):
                 if step >= 400 and real_loss < best_loss and real_loss < 4.5:
                     best_loss = real_loss
                     best_path = os.path.join(drive_path, "best_model.pth")
-                    # 💥 NEW: TPU Safe Save
                     xm.save(checkpoint, best_path)
                     print(f"🌟 New Best Model! Saved to {best_path} (Loss: {best_loss:.4f})")
 
                 if (step + 1) % 1000 == 0:
                     interval_path = os.path.join(drive_path, "latest_step_model.pth")
-                    # 💥 NEW: TPU Safe Save
                     xm.save(checkpoint, interval_path)
                     print(f"💾 Interval Backup! Saved step {step} to Kaggle Dir.")
                     generate_sample(model, device)
 
 # ==========================================
-# 💥 NEW: The TPU Launch Trigger
+# The TPU Launch Trigger
 # ==========================================
 if __name__ == '__main__':
     # Spawns 8 processes automatically for the v5e-8!
