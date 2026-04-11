@@ -64,7 +64,7 @@ def train_tpu(index):
     # 4. Optimization Setup
     # ==========================================
     # 💥 THE FIX: Absolute finish line for the dataset
-    global_max_steps = 228880
+    global_max_steps = 176329
     learning_rate = 2e-4
     warmup_steps = 500
 
