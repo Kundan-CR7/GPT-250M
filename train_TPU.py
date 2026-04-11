@@ -189,7 +189,7 @@ def train_tpu(index):
     # ==========================================
     model.train()
     data_iter = batch_generator(train_dataset, micro_batch_size, ddp_rank, start_step)
-    optimizer.zero_grad(set_to_none=True)
+    optimizer.zero_grad()
 
     # FIX 2: loss_val must exist before the checkpoint block can reference it.
     # Initialise here so it is always defined even at step 0.
