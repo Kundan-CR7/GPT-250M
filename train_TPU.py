@@ -181,13 +181,10 @@ def train_tpu(index):
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
+        # This handles the weights AND the sync barrier natively!
         xm.optimizer_step(optimizer)
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad() 
         scheduler.step()
-
-        # 💥 THE FIX: Explicitly tell the TPU to execute the graph right now!
-        # This prevents the TPU from building a 10-step "Mega-Graph" and exploding.
-        xm.mark_step()
 
         # ==========================================
         # 8. Logging and Checkpoint Saving
@@ -218,7 +215,7 @@ def train_tpu(index):
             if master_process:
                 print(f"💾 Interval Backup! Saved to {interval_path}")
             
-            generate_sample(model, device, master_process)
+            generate_sample(model, device, master_process) 
 
 # ==========================================
 # The TPU Launch Trigger
