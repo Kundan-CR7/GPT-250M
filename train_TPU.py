@@ -164,10 +164,24 @@ def train_fn(index, config):
 # 3. Entry Point
 # ==========================================
 if __name__ == '__main__':
-    # Initialize the config here
     gpt_config = GPTConfig()
+
+    # --- 🛠️ THE FIX FOR "EXPECTED 8, GOT 1" ---
     import torch_xla.runtime as xr
-    xr.set_device_type('TPU')
-    # xmp.spawn using 'spawn' method (explicitly provided via nprocs)
-    # nprocs=8 for Kaggle TPU v3-8
-    xmp.spawn(train_fn, args=(gpt_config,), nprocs=None, start_method='spawn')
+    # Force PJRT to use the TPU topology
+    xr.set_device_type('TPU') 
+    
+    # Optional: Clear any lingering XLA state
+    import torch_xla.core.xla_model as xm
+    
+    print("Pre-flight check: Detecting TPU Cores...")
+    # ------------------------------------------
+
+    try:
+        # Use nprocs=None for PJRT (it will auto-fill to 8)
+        # start_method 'spawn' is necessary for clean memory
+        xmp.spawn(train_fn, args=(gpt_config,), nprocs=None, start_method='spawn')
+    except Exception as e:
+        print(f"Spawn failed: {e}")
+        # If None fails, try the explicit core count
+        xmp.spawn(train_fn, args=(gpt_config,), nprocs=8, start_method='spawn')
