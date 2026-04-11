@@ -63,9 +63,9 @@ def train_tpu(index):
     # 4. Optimization Setup
     # ==========================================
     start_step = 0
-    max_steps = 57220
-    learning_rate = 5e-4
-    warmup_steps = 10000
+    max_steps = 17245
+    learning_rate = 2e-4
+    warmup_steps = 500
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
