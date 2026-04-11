@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import tiktoken
 
-# 💥 NEW: Modern PyTorch XLA Imports
+# Modern PyTorch XLA Imports
 import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
@@ -26,11 +26,11 @@ from model import GPT
 # 1. The TPU Multiprocessing Wrapper
 # ==========================================
 def train_tpu(index):
-    # 💥 THE FIX: Modern PJRT hardware setup
-    device = torch_xla.device()               # No more deprecation warning
-    ddp_rank = xr.global_ordinal()            # Replaces xm.get_ordinal()
-    ddp_world_size = xr.world_size()          # Replaces xm.xrt_world_size()
-    master_process = (ddp_rank == 0)          # Replaces xm.is_master_ordinal()
+    # Modern PJRT hardware setup
+    device = torch_xla.device()               
+    ddp_rank = xr.global_ordinal()            
+    ddp_world_size = xr.world_size()          
+    master_process = (ddp_rank == 0)          
 
     if master_process:
         print(f"Training on device: {device} | TPU Cores detected: {ddp_world_size}")
@@ -40,8 +40,7 @@ def train_tpu(index):
     # ==========================================
     config = GPTConfig()
 
-    # 💥 NO MORE GRADIENT ACCUMULATION!
-    # We use all 128GB of RAM to process the batch in one massive shot.
+    # NO MORE GRADIENT ACCUMULATION!
     micro_batch_size = 16 
 
     data_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"
@@ -50,19 +49,19 @@ def train_tpu(index):
         print("Initializing dataset...")
     train_dataset = GPTDataset(data_path=data_path, block_size=config.block_size)
 
-    # ... (Model Setup stays the same) ...
+    # ==========================================
+    # 3. Model Setup (💥 THIS WAS MISSING!)
+    # ==========================================
+    if master_process:
+        print("Initializing model...")
+    model = GPT(config)
+    model.to(device)
 
     # ==========================================
     # 4. Optimization Setup
     # ==========================================
     start_step = 0
-    max_steps = 57220 # 💥 Adjusted for the massive 128-sequence ingestion rate!
-
-    # ==========================================
-    # 4. Optimization Setup
-    # ==========================================
-    start_step = 0
-    max_steps = 114440
+    max_steps = 57220 # Adjusted for the massive 128-sequence ingestion rate!
     
     learning_rate = 5e-4
     warmup_steps = 10000
@@ -97,7 +96,6 @@ def train_tpu(index):
         
         model.load_state_dict(checkpoint["model_state_dict"])
         # optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        
         # if "scheduler_state_dict" in checkpoint:
         #     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         
@@ -118,7 +116,6 @@ def train_tpu(index):
     # 6. Evaluation Sampling Function
     # ==========================================
     def generate_sample(model, device, master_process, prompt="Tell me something about AI", max_new_tokens=70):
-        # 💥 REMOVED the early return! ALL cores must run this to stay in sync!
         model.eval()
         enc = tiktoken.get_encoding("gpt2")
         tokens = enc.encode(prompt)
@@ -144,92 +141,87 @@ def train_tpu(index):
             
         model.train()
 
-        # ==========================================
-        # 7. The Distributed Training Loop
-        # ==========================================
-        model.train()
+    # ==========================================
+    # 7. The Distributed Training Loop
+    # ==========================================
+    model.train()
 
-        def create_batch_generator(dataset, micro_batch_size, ddp_rank, start_step, seed=42):
-            g = torch.Generator()
-            g.manual_seed(seed + ddp_rank + start_step) 
-            max_idx = len(dataset)
-            
-            while True:
-                x_batch, y_batch = [], []
-                indices = torch.randint(0, max_idx, (micro_batch_size,), generator=g).tolist()
-                for idx in indices:
-                    x, y = dataset[idx]
-                    x_batch.append(x)
-                    y_batch.append(y)
-                yield torch.stack(x_batch), torch.stack(y_batch)
+    def create_batch_generator(dataset, micro_batch_size, ddp_rank, start_step, seed=42):
+        g = torch.Generator()
+        g.manual_seed(seed + ddp_rank + start_step) 
+        max_idx = len(dataset)
+        
+        while True:
+            x_batch, y_batch = [], []
+            indices = torch.randint(0, max_idx, (micro_batch_size,), generator=g).tolist()
+            for idx in indices:
+                x, y = dataset[idx]
+                x_batch.append(x)
+                y_batch.append(y)
+            yield torch.stack(x_batch), torch.stack(y_batch)
 
-        train_iter = create_batch_generator(train_dataset, micro_batch_size, ddp_rank, start_step)
+    train_iter = create_batch_generator(train_dataset, micro_batch_size, ddp_rank, start_step)
+    optimizer.zero_grad(set_to_none=True)
+    t0 = time.time()
+
+    if master_process:
+        print("Starting TPU distributed training loop...")
+
+    for step in range(start_step, max_steps):
+        x, y = next(train_iter)
+        x, y = x.to(device), y.to(device)
+
+        # TPU bfloat16 Context Manager
+        with torch.autocast('xla', dtype=torch.bfloat16):
+            logits = model(x)
+            B, T, C = logits.shape
+            loss = F.cross_entropy(logits.view(B * T, C), y.view(B * T))
+
+        # CLEAN ONE-SHOT STEP
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        xm.optimizer_step(optimizer)
         optimizer.zero_grad(set_to_none=True)
-        t0 = time.time()
+        scheduler.step()
 
+        # ==========================================
+        # 8. Logging and Checkpoint Saving
+        # ==========================================
+        real_loss = loss.detach().item() 
+        
         if master_process:
-            print("Starting TPU distributed training loop...")
+            if step % 10 == 0 and step > 0:
+                t1 = time.time()
+                dt = t1 - t0
+                tokens_processed = 10 * (micro_batch_size * ddp_world_size) * config.block_size
+                print(f"Step {step:5d} | Loss: {real_loss:.4f} | Speed: {(tokens_processed / dt):.2f} tok/sec")
+                t0 = time.time() 
 
-        for step in range(start_step, max_steps):
-            x, y = next(train_iter)
-            x, y = x.to(device), y.to(device)
-
-            # 💥 TPU bfloat16 Context Manager
-            with torch.autocast('xla', dtype=torch.bfloat16):
-                logits = model(x)
-                B, T, C = logits.shape
-                loss = F.cross_entropy(logits.view(B * T, C), y.view(B * T))
-
-            # 💥 CLEAN ONE-SHOT STEP (No accumulation memory explosions)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            # optimizer_step internally forces the TPU to compile and clear the graph!
-            xm.optimizer_step(optimizer)
-            optimizer.zero_grad(set_to_none=True)
-            scheduler.step()
-
-            # ==========================================
-            # 8. Logging and Checkpoint Saving
-            # ==========================================
-            # All 8 cores evaluate the scalar safely to stay in sync
-            real_loss = loss.detach().item() 
+        checkpoint = {
+            "step": step,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "best_loss": best_loss if 'best_loss' in locals() else real_loss
+        }
+        
+        if step >= 400 and real_loss < best_loss and real_loss < 4.5:
+            best_loss = real_loss
+            best_path = os.path.join(drive_path, "best_model.pth")
+            xm.save(checkpoint, best_path) 
             
             if master_process:
-                if step % 10 == 0 and step > 0:
-                    t1 = time.time()
-                    dt = t1 - t0
-                    tokens_processed = 10 * (micro_batch_size * ddp_world_size) * config.block_size
-                    print(f"Step {step:5d} | Loss: {real_loss:.4f} | Speed: {(tokens_processed / dt):.2f} tok/sec")
-                    t0 = time.time() 
+                print(f"🌟 New Best Model! Saved to {best_path} (Loss: {best_loss:.4f})")
 
-            # ALL cores build the dictionary to stay mathematically synced
-            checkpoint = {
-                "step": step,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "best_loss": best_loss if 'best_loss' in locals() else real_loss
-            }
+        if (step + 1) % 1000 == 0:
+            interval_path = os.path.join(drive_path, "latest_step_model.pth")
+            xm.save(checkpoint, interval_path)
             
-            # ALL cores evaluate save conditions
-            if step >= 400 and real_loss < best_loss and real_loss < 4.5:
-                best_loss = real_loss
-                best_path = os.path.join(drive_path, "best_model.pth")
-                xm.save(checkpoint, best_path) # xm.save naturally protects against multi-write corruption
-                
-                if master_process:
-                    print(f"🌟 New Best Model! Saved to {best_path} (Loss: {best_loss:.4f})")
-
-            if (step + 1) % 1000 == 0:
-                interval_path = os.path.join(drive_path, "latest_step_model.pth")
-                xm.save(checkpoint, interval_path)
-                
-                if master_process:
-                    print(f"💾 Interval Backup! Saved step {step} to Kaggle Dir.")
-                
-                # ALL cores must generate sample to prevent XLA divergence!
-                generate_sample(model, device)
+            if master_process:
+                print(f"💾 Interval Backup! Saved step {step} to Kaggle Dir.")
+            
+            generate_sample(model, device, master_process)
 
 # ==========================================
 # The TPU Launch Trigger
