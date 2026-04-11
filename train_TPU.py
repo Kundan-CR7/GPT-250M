@@ -34,8 +34,8 @@ def train_tpu(index):
     config = GPTConfig()
 
     # NOTE: With 128GB of TPU memory, you can likely increase this target_batch_size massively later!
-    target_batch_size = 36 
-    micro_batch_size = 6
+    target_batch_size = 256
+    micro_batch_size = 8
     assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
     gradient_accumulation_steps = target_batch_size // (micro_batch_size * ddp_world_size)
 
@@ -55,7 +55,7 @@ def train_tpu(index):
     # 4. Optimization Setup
     # ==========================================
     start_step = 0
-    max_steps = 610352
+    max_steps = 114440
     
     # 💥 REMOVED GradScaler: TPUs use bfloat16 natively!
     learning_rate = 5e-4
