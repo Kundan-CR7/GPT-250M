@@ -1,4 +1,5 @@
 import os
+os.environ["PJRT_DEVICE"] = "TPU"
 import time
 import torch
 import torch.nn.functional as F
