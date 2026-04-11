@@ -132,7 +132,7 @@ raw_model = model.module if ddp else model
 # ==========================================
 # 6. Evaluation Sampling Function
 # ==========================================
-def generate_sample(model, device, prompt="The ", max_new_tokens=30):
+def generate_sample(model, device, prompt="Tell me something about AI", max_new_tokens=70):
     model.eval()
     
     import gc
