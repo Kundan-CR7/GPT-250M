@@ -1,6 +1,5 @@
 import os
 import time
-import math
 
 # ============================================================
 # TPU ENVIRONMENT SETUP — Must happen before any XLA imports!
@@ -41,12 +40,12 @@ def train_tpu(index):
     # 2. Hyperparameters
     # ==========================================
     config           = GPTConfig()
-    micro_batch_size = 4           # 4 per core x 8 cores = 32 effective batch
+    micro_batch_size = 4        # 4 per core x 8 cores = 32 effective batch
+                                # tokens/step = 4 x 8 x 1024 = 32,768
+                                # steps for 5B tokens = 5B / 32,768 = 152,587
 
-    # tokens/step = 4 x 8 x 1024 = 32,768
-    # steps for 5B tokens = 5_000_000_000 / 32_768 = 152,587
     max_steps    = 152_587
-    warmup_steps = 7_629           # 5% of max_steps
+    warmup_steps = 7_629        # 5% of max_steps
     max_lr       = 6e-4
     min_lr       = 6e-5
     weight_decay = 0.1
@@ -61,10 +60,10 @@ def train_tpu(index):
     train_dataset = GPTDataset(data_path=data_path, block_size=config.block_size)
 
     # ==========================================
-    # 4. Model — always from scratch
+    # 4. Model
     # ==========================================
     if is_master:
-        print("Building model from scratch...")
+        print("Building model...")
     model = GPT(config)
     model.to(device)
 
@@ -82,7 +81,6 @@ def train_tpu(index):
         weight_decay=weight_decay,
         eps=1e-8,
     )
-
     warmup_scheduler = LinearLR(
         optimizer,
         start_factor=0.01,
@@ -112,8 +110,6 @@ def train_tpu(index):
 
     # ==========================================
     # 7. Resume logic
-    #    Restores model weights, optimizer state,
-    #    AND scheduler state so LR continues correctly.
     # ==========================================
     start_step = 0
     best_loss  = float("inf")
@@ -124,7 +120,6 @@ def train_tpu(index):
         ckpt = torch.load(latest_ckpt, map_location="cpu")
         model.load_state_dict(ckpt["model_state_dict"])
 
-        # Restore optimizer + scheduler so LR curve is never broken
         if "optimizer_state_dict" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         if "scheduler_state_dict" in ckpt:
@@ -133,9 +128,12 @@ def train_tpu(index):
         start_step = ckpt.get("step", 0) + 1
         best_loss  = ckpt.get("best_loss", float("inf"))
         del ckpt
-        import gc; gc.collect()
+
+        import gc
+        gc.collect()
+
         if is_master:
-            print(f"Resumed at step {start_step} | best_loss so far: {best_loss:.4f}")
+            print(f"Resumed at step {start_step} | best_loss: {best_loss:.4f}")
     else:
         if is_master:
             print("No checkpoint found — training from scratch.")
@@ -151,7 +149,8 @@ def train_tpu(index):
             xs, ys = [], []
             for idx in torch.randint(0, n, (batch_size,), generator=g).tolist():
                 x, y = dataset[idx]
-                xs.append(x); ys.append(y)
+                xs.append(x)
+                ys.append(y)
             yield torch.stack(xs), torch.stack(ys)
 
     # ==========================================
@@ -170,7 +169,8 @@ def train_tpu(index):
         with torch.no_grad():
             for _ in range(max_new_tokens):
                 sl   = x.size(1)
-                cond = x[:, max(0, sl - config.block_size):]
+                # FIX 1: safe slice — avoids TPU out-of-bounds on short sequences
+                cond     = x[:, max(0, sl - config.block_size):]
                 logits   = model(cond)
                 logits   = logits[:, -1, :]
                 probs    = F.softmax(logits / 0.8, dim=-1)
@@ -181,6 +181,7 @@ def train_tpu(index):
         if is_master:
             print(f"Output: {enc.decode(x[0].tolist())}")
             print("--------------\n")
+
         model.train()
 
     # ==========================================
@@ -189,6 +190,11 @@ def train_tpu(index):
     model.train()
     data_iter = batch_generator(train_dataset, micro_batch_size, ddp_rank, start_step)
     optimizer.zero_grad(set_to_none=True)
+
+    # FIX 2: loss_val must exist before the checkpoint block can reference it.
+    # Initialise here so it is always defined even at step 0.
+    loss_val = float("inf")
+
     t0 = time.time()
 
     if is_master:
@@ -214,10 +220,14 @@ def train_tpu(index):
         xm.optimizer_step(optimizer)
         optimizer.zero_grad(set_to_none=True)
         scheduler.step()
+
+        # FIX 3: mark_step AFTER scheduler.step() so the full graph
+        # (forward + backward + optimizer + scheduler) executes atomically.
         xm.mark_step()
 
-        # -- logging --
+        # -- logging every 10 steps --
         if step % 10 == 0:
+            # .item() syncs the TPU value to Python — safe after mark_step
             loss_val = loss.detach().item()
             cur_lr   = scheduler.get_last_lr()[0]
 
@@ -237,7 +247,10 @@ def train_tpu(index):
         if (step + 1) % 500 == 0:
             xm.rendezvous("pre_save")
 
-            loss_val = loss.detach().item()
+            # Fetch loss if we are not on a logging step
+            if (step % 10) != 0:
+                loss_val = loss.detach().item()
+
             if loss_val < best_loss:
                 best_loss = loss_val
 
