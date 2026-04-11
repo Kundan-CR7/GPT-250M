@@ -11,9 +11,11 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import tiktoken
 
-# PyTorch XLA Imports
+# 💥 NEW: Modern PyTorch XLA Imports
+import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
+import torch_xla.runtime as xr
 
 # Import our custom modules
 from config import GPTConfig
@@ -24,11 +26,11 @@ from model import GPT
 # 1. The TPU Multiprocessing Wrapper
 # ==========================================
 def train_tpu(index):
-    # TPU Hardware Setup
-    device = xm.xla_device()
-    ddp_rank = xm.get_ordinal()
-    ddp_world_size = xm.xrt_world_size()
-    master_process = xm.is_master_ordinal(local=False)
+    # 💥 THE FIX: Modern PJRT hardware setup
+    device = torch_xla.device()               # No more deprecation warning
+    ddp_rank = xr.global_ordinal()            # Replaces xm.get_ordinal()
+    ddp_world_size = xr.world_size()          # Replaces xm.xrt_world_size()
+    master_process = (ddp_rank == 0)          # Replaces xm.is_master_ordinal()
 
     if master_process:
         print(f"Training on device: {device} | TPU Cores detected: {ddp_world_size}")
@@ -123,8 +125,9 @@ def train_tpu(index):
         tokens = enc.encode(prompt)
         x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
         
-        xm.master_print("\n--- 🧠 Model Brain Check ---")
-        xm.master_print(f"Prompt: '{prompt}'")
+        # Modern Python Print (Safe inside the if not master_process check)
+        print("\n--- 🧠 Model Brain Check ---")
+        print(f"Prompt: '{prompt}'")
         
         with torch.no_grad():
             for _ in range(max_new_tokens):
@@ -136,8 +139,8 @@ def train_tpu(index):
                 x = torch.cat((x, next_token), dim=1)
                 
         output_text = enc.decode(x[0].tolist())
-        xm.master_print(f"Output: {output_text}")
-        xm.master_print("----------------------------\n")
+        print(f"Output: {output_text}")
+        print("----------------------------\n")
         model.train()
 
     # ==========================================
