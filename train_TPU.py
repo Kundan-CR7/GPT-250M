@@ -41,7 +41,7 @@ def train_tpu(index):
     config = GPTConfig()
 
     # NO MORE GRADIENT ACCUMULATION!
-    micro_batch_size = 16 
+    micro_batch_size = 4
 
     data_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"
 
