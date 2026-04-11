@@ -1,4 +1,7 @@
 import os
+os.environ['PJRT_DEVICE'] = 'TPU'
+os.environ['XLA_USE_BF16'] = '1'
+os.environ['TPU_NUM_DEVICES'] = '8'
 import time
 import torch
 import torch.nn.functional as F
@@ -164,8 +167,6 @@ def train_fn(index, config):
 # 3. Entry Point
 # ==========================================
 if __name__ == '__main__':
-    os.environ['TPU_PROCESS_ADDRESSES'] = 'local'
-    os.environ['XLA_USE_BF16'] = '1'
     gpt_config = GPTConfig()
 
     # --- 🛠️ THE FIX FOR "EXPECTED 8, GOT 1" ---
