@@ -185,11 +185,13 @@ def train_tpu(index):
         optimizer.zero_grad(set_to_none=True)
         scheduler.step()
 
+        # 💥 THE FIX: Explicitly tell the TPU to execute the graph right now!
+        # This prevents the TPU from building a 10-step "Mega-Graph" and exploding.
+        xm.mark_step()
+
         # ==========================================
         # 8. Logging and Checkpoint Saving
         # ==========================================
-        # 💥 THE FIX: We only extract the loss from the TPU every 10 steps.
-        # This prevents the TPU from stalling on the CPU every single loop!
         if step % 10 == 0:
             real_loss = loss.detach().item() 
             
@@ -199,12 +201,9 @@ def train_tpu(index):
                     dt = t1 - t0
                     tokens_processed = 10 * (micro_batch_size * ddp_world_size) * config.block_size
                     print(f"Step {step:5d} | Loss: {real_loss:.4f} | Speed: {(tokens_processed / dt):.2f} tok/sec")
-                # Reset the clock every 10 steps so the speed is perfectly accurate
                 t0 = time.time() 
 
-        # 💥 THE FIX: Interval Saving Only!
-        # Because 'step' is a guaranteed exact match on all 8 cores, 
-        # they will all enter this xm.save() block simultaneously. No more deadlocks!
+        # Interval Saving Only (Guaranteed dead-lock free)
         if (step + 1) % 500 == 0:
             checkpoint = {
                 "step": step,
@@ -213,14 +212,12 @@ def train_tpu(index):
                 "scheduler_state_dict": scheduler.state_dict(),
             }
             
-            # Save a numbered checkpoint so you can pick the best one later
             interval_path = os.path.join(drive_path, f"model_step_{step+1}.pth")
             xm.save(checkpoint, interval_path) 
             
             if master_process:
                 print(f"💾 Interval Backup! Saved to {interval_path}")
             
-            # ALL cores must generate sample to prevent XLA divergence!
             generate_sample(model, device, master_process)
 
 # ==========================================
