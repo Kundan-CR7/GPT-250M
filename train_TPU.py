@@ -43,7 +43,7 @@ def train_tpu(index):
     # ==========================================
     config = GPTConfig()
 
-    micro_batch_size = 4
+    micro_batch_size = 32
 
     data_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"
 
@@ -153,7 +153,9 @@ def train_tpu(index):
 
         with torch.no_grad():
             for _ in range(max_new_tokens):
-                x_cond = x[:, -config.block_size:]
+                seq_len = x.size(1)
+                start_idx = max(0, seq_len - config.block_size)
+                x_cond = x[:, start_idx:]
                 logits = model(x_cond)
                 logits = logits[:, -1, :]
                 probs = F.softmax(logits / 0.8, dim=-1)
