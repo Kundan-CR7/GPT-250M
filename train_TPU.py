@@ -188,39 +188,39 @@ def train_tpu(index):
         # ==========================================
         # 8. Logging and Checkpoint Saving
         # ==========================================
-        real_loss = loss.detach().item() 
-        
-        if master_process:
-            if step % 10 == 0 and step > 0:
-                t1 = time.time()
-                dt = t1 - t0
-                tokens_processed = 10 * (micro_batch_size * ddp_world_size) * config.block_size
-                print(f"Step {step:5d} | Loss: {real_loss:.4f} | Speed: {(tokens_processed / dt):.2f} tok/sec")
+        # 💥 THE FIX: We only extract the loss from the TPU every 10 steps.
+        # This prevents the TPU from stalling on the CPU every single loop!
+        if step % 10 == 0:
+            real_loss = loss.detach().item() 
+            
+            if master_process:
+                if step > 0:
+                    t1 = time.time()
+                    dt = t1 - t0
+                    tokens_processed = 10 * (micro_batch_size * ddp_world_size) * config.block_size
+                    print(f"Step {step:5d} | Loss: {real_loss:.4f} | Speed: {(tokens_processed / dt):.2f} tok/sec")
+                # Reset the clock every 10 steps so the speed is perfectly accurate
                 t0 = time.time() 
 
-        checkpoint = {
-            "step": step,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "best_loss": best_loss if 'best_loss' in locals() else real_loss
-        }
-        
-        if step >= 400 and real_loss < best_loss and real_loss < 4.5:
-            best_loss = real_loss
-            best_path = os.path.join(drive_path, "best_model.pth")
-            xm.save(checkpoint, best_path) 
+        # 💥 THE FIX: Interval Saving Only!
+        # Because 'step' is a guaranteed exact match on all 8 cores, 
+        # they will all enter this xm.save() block simultaneously. No more deadlocks!
+        if (step + 1) % 500 == 0:
+            checkpoint = {
+                "step": step,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+            }
+            
+            # Save a numbered checkpoint so you can pick the best one later
+            interval_path = os.path.join(drive_path, f"model_step_{step+1}.pth")
+            xm.save(checkpoint, interval_path) 
             
             if master_process:
-                print(f"🌟 New Best Model! Saved to {best_path} (Loss: {best_loss:.4f})")
-
-        if (step + 1) % 1000 == 0:
-            interval_path = os.path.join(drive_path, "latest_step_model.pth")
-            xm.save(checkpoint, interval_path)
+                print(f"💾 Interval Backup! Saved to {interval_path}")
             
-            if master_process:
-                print(f"💾 Interval Backup! Saved step {step} to Kaggle Dir.")
-            
+            # ALL cores must generate sample to prevent XLA divergence!
             generate_sample(model, device, master_process)
 
 # ==========================================
