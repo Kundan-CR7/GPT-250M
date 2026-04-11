@@ -43,6 +43,7 @@ def train_tpu(index):
     # ==========================================
     config = GPTConfig()
 
+    # Note: Ensure this batch size fits in your 15.75GB TPU core limit!
     micro_batch_size = 32
 
     data_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"
@@ -62,7 +63,6 @@ def train_tpu(index):
     # ==========================================
     # 4. Optimization Setup
     # ==========================================
-    start_step = 0
     max_steps = 17245
     learning_rate = 2e-4
     warmup_steps = 500
@@ -109,7 +109,8 @@ def train_tpu(index):
         load_path = input_checkpoint
 
     best_loss = float('inf')
-
+    resumed_from = 0
+    
     if load_path:
         if master_process:
             print(f"Loading checkpoint from: {load_path}...")
@@ -123,7 +124,7 @@ def train_tpu(index):
         # if "scheduler_state_dict" in checkpoint:
         #     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
-        start_step = checkpoint["step"] + 1
+        resumed_from = checkpoint.get("step", 0)
         best_loss = checkpoint.get("best_loss", float('inf'))
 
         del checkpoint
@@ -131,7 +132,7 @@ def train_tpu(index):
         gc.collect()
 
         if master_process:
-            print(f"Successfully resumed! Starting from step {start_step}")
+            print(f"Successfully resumed! Historical step is {resumed_from}")
     else:
         if master_process:
             print("No checkpoint found. Starting training from scratch!")
@@ -174,17 +175,15 @@ def train_tpu(index):
     # ==========================================
     # 7. Batch Generator
     # ==========================================
-    def create_batch_generator(dataset, micro_batch_size, ddp_rank,
-                               start_step, seed=42):
+    def create_batch_generator(dataset, micro_batch_size, ddp_rank, historical_step, seed=42):
         g = torch.Generator()
-        g.manual_seed(seed + ddp_rank + start_step)
+        # Uses the historical step to ensure we don't repeat data!
+        g.manual_seed(seed + ddp_rank + historical_step) 
         max_idx = len(dataset)
-
+        
         while True:
             x_batch, y_batch = [], []
-            indices = torch.randint(
-                0, max_idx, (micro_batch_size,), generator=g
-            ).tolist()
+            indices = torch.randint(0, max_idx, (micro_batch_size,), generator=g).tolist()
             for idx in indices:
                 x, y = dataset[idx]
                 x_batch.append(x)
@@ -192,23 +191,28 @@ def train_tpu(index):
             yield torch.stack(x_batch), torch.stack(y_batch)
 
     # ==========================================
-    # 8. Distributed Training Loop
+    # 8. The Distributed Training Loop
     # ==========================================
     model.train()
-    train_iter = create_batch_generator(
-        train_dataset, micro_batch_size, ddp_rank, start_step
-    )
-    optimizer.zero_grad(set_to_none=True)
+
+    # Pass resumed_from to the generator
+    train_iter = create_batch_generator(train_dataset, micro_batch_size, ddp_rank, resumed_from)
+    optimizer.zero_grad()
     t0 = time.time()
 
     if master_process:
-        print("Starting TPU distributed training loop...")
+        print(f"Starting TPU loop for {max_steps} session steps...")
 
-    for step in range(start_step, max_steps):
+    # The loop always runs from 0 to max_steps for THIS session
+    for current_step in range(max_steps):
+        
+        # Calculate the true historical step for saving
+        cumulative_step = resumed_from + current_step + 1
+        
         x, y = next(train_iter)
         x, y = x.to(device), y.to(device)
 
-        # TPU bfloat16 forward pass
+        # TPU bfloat16 Context Manager
         with torch.autocast('xla', dtype=torch.bfloat16):
             logits = model(x)
             B, T, C = logits.shape
@@ -216,25 +220,21 @@ def train_tpu(index):
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-        # XLA optimizer step — fuses allreduce + weight update
+        
         xm.optimizer_step(optimizer)
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad()
         scheduler.step()
-
-        # Tell the TPU to execute the compiled graph now.
-        # Prevents multi-step "mega-graph" buildup.
         xm.mark_step()
 
         # ==========================================
         # 9. Logging
         # ==========================================
-        if step % 10 == 0:
+        if current_step % 10 == 0:
             # .item() implicitly calls mark_step / syncs the value
             real_loss = loss.detach().item()
 
             if master_process:
-                if step > 0:
+                if current_step > 0:
                     t1 = time.time()
                     dt = t1 - t0
                     tokens_processed = (
@@ -242,7 +242,7 @@ def train_tpu(index):
                     )
                     tok_per_sec = tokens_processed / dt
                     print(
-                        f"Step {step:5d} | "
+                        f"Step {current_step:5d}/{max_steps} (historical: {cumulative_step}) | "
                         f"Loss: {real_loss:.4f} | "
                         f"Speed: {tok_per_sec:.2f} tok/sec"
                     )
@@ -251,23 +251,23 @@ def train_tpu(index):
         # ==========================================
         # 10. Interval Checkpointing
         # ==========================================
-        if (step + 1) % 500 == 0:
+        if (current_step + 1) % 500 == 0:
             # Sync all ranks before saving
             xm.rendezvous("pre_save_sync")
 
             checkpoint = {
-                "step": step,
+                "step": cumulative_step, # Saves the true historical step
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_loss": best_loss,
             }
 
-            interval_path = os.path.join(drive_path, f"model_step_{step + 1}.pth")
-            # xm.save handles cross-rank coordination automatically
+            # Save the file using the cumulative historical step
+            interval_path = os.path.join(drive_path, f"model_step_{cumulative_step}.pth")
             xm.save(checkpoint, interval_path)
 
-            # Also overwrite the "latest" checkpoint for easy resuming
+            # Overwrite the "latest" checkpoint for easy resuming
             xm.save(checkpoint, working_checkpoint)
 
             if master_process:
@@ -277,11 +277,7 @@ def train_tpu(index):
 
 
 # ==========================================
-# TPU Launch — use 'spawn', NOT 'fork'
-# 'fork' causes the TPU runtime metrics crash:
-#   "Check failed: reporting_closure_ == nullptr"
-# because forked children inherit already-initialized
-# TPU state from the parent process.
+# TPU Launch
 # ==========================================
 if __name__ == '__main__':
     xmp.spawn(train_tpu, args=(), nprocs=None, start_method='spawn')
