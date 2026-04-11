@@ -169,4 +169,4 @@ if __name__ == '__main__':
     
     # xmp.spawn using 'spawn' method (explicitly provided via nprocs)
     # nprocs=8 for Kaggle TPU v3-8
-    xmp.spawn(train_fn, args=(gpt_config,), nprocs=8, start_method='spawn')
+    xmp.spawn(train_fn, args=(gpt_config,), nprocs=None, start_method='spawn')
