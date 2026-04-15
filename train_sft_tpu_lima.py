@@ -144,4 +144,5 @@ FLAGS = {
 }
 
 if __name__ == '__main__':
-    xmp.spawn(train_loop_fn, args=(FLAGS,), nprocs=8, start_method='fork')
+    # Set nprocs to None so it automatically uses all 8 TPU cores
+    xmp.spawn(train_loop_fn, args=(FLAGS,), nprocs=None)
