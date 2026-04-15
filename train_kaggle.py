@@ -202,7 +202,7 @@ t0 = time.time()
 if master_process:
     print("Starting distributed training loop...")
 
-for step in range(start_step, max_steps):
+for step in range(start_step, start_step + 1):
     
     # ⚡ No try/except needed, our generator yields infinitely!
     x, y = next(train_iter)
