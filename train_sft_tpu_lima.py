@@ -75,6 +75,8 @@ class LIMADataset(Dataset):
 # 2. The TPU Training Function
 # ==========================================
 def train_loop_fn(index, flags):
+    import torch_xla.core.xla_model as xm
+    import torch_xla.distributed.parallel_loader as pl
     torch.manual_seed(flags['seed'])
     device = xm.xla_device()
     
