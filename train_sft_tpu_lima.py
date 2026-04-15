@@ -1,4 +1,8 @@
 import os
+os.environ['PJRT_DEVICE'] = 'TPU'
+
+# Optional: Force the TPU to use all 8 devices
+os.environ['TPU_NUM_DEVICES'] = '8'
 import torch
 import torch.nn.functional as F
 import tiktoken
