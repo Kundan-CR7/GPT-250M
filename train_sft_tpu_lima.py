@@ -1,8 +1,16 @@
 import os
+
+# Force PJRT to use the TPU local topology
 os.environ['PJRT_DEVICE'] = 'TPU'
 
-# Optional: Force the TPU to use all 8 devices
+# Explicitly tell it there are 8 local devices
 os.environ['TPU_NUM_DEVICES'] = '8'
+
+# This prevents the "worker address" mismatch by forcing a local-only setup
+os.environ['TPU_CHIPS_PER_HOST_BOUNDS'] = '2,2,1' 
+os.environ['TPU_HOST_BOUNDS'] = '1,1,1'
+os.environ['TPU_MESH_CONTROLLER_ADDRESS'] = 'localhost:8476'
+os.environ['TPU_MESH_CONTROLLER_PORT'] = '8476'
 import torch
 import torch.nn.functional as F
 import tiktoken
