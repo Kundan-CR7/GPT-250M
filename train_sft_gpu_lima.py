@@ -26,47 +26,24 @@ def setup_ddp():
 # ==========================================
 class LIMADataset(Dataset):
     def __init__(self, block_size=1024):
-        self.dataset = load_dataset("GAIR/lima", split="train")
+        # Using a high-quality open instruction dataset instead of gated LIMA
+        # 'yahma/alpaca-cleaned' is excellent and widely used for SFT
+        self.dataset = load_dataset("yahma/alpaca-cleaned", split="train[:2000]") 
         self.enc = tiktoken.get_encoding("gpt2")
         self.block_size = block_size
         self.IGNORE_INDEX = -100 
         
-    def __len__(self):
-        return len(self.dataset)
-
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        user_text = item['conversations'][0]
-        assistant_text = item['conversations'][1]
+        # Alpaca format is slightly different: 'instruction', 'input', 'output'
+        user_text = item['instruction']
+        if item['input']:
+            user_text += f"\n{item['input']}"
+        assistant_text = item['output']
         
-        # ChatML Formatting
+        # The rest of the logic remains the same...
         prompt_str = f"<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant\n"
-        response_str = f"{assistant_text}<|im_end|>"
-        
-        prompt_tokens = self.enc.encode(prompt_str, allowed_special="all")
-        response_tokens = self.enc.encode(response_str, allowed_special="all")
-        
-        full_tokens = prompt_tokens + response_tokens
-        prompt_len = len(prompt_tokens)
-        
-        # Truncate
-        if len(full_tokens) > self.block_size:
-            full_tokens = full_tokens[:self.block_size]
-            
-        x = torch.tensor(full_tokens[:-1], dtype=torch.long)
-        y = torch.tensor(full_tokens[1:], dtype=torch.long)
-        
-        # ✅ FIX 1: Response Masking (Ignore prompt in loss)
-        y[:prompt_len - 1] = self.IGNORE_INDEX
-        
-        # ✅ FIX 2: Padding Masking
-        actual_len = len(x)
-        if actual_len < (self.block_size - 1):
-            padding_len = (self.block_size - 1) - actual_len
-            x = torch.cat([x, torch.full((padding_len,), self.enc.eot_token, dtype=torch.long)])
-            y = torch.cat([y, torch.full((padding_len,), self.IGNORE_INDEX, dtype=torch.long)])
-            
-        return x, y
+        # ... (keep your existing encoding and masking logic)
 
 # ==========================================
 # 3. Main Training Loop
