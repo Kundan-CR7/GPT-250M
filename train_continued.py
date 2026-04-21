@@ -20,7 +20,7 @@ from model import GPT
 # =========================================================
 # PATHS — EDIT THESE
 # =========================================================
-FINEWEB_PATH      = "/kaggle/input/YOUR-FINEWEB-DATASET/train.bin"    # <-- edit
+FINEWEB_PATH      = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"    # <-- edit
 OLD_CHECKPOINT    = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_step_model.pth"
 WORKING_CKPT_DIR  = "/kaggle/working/checkpoints"
 
