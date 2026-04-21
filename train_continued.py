@@ -55,7 +55,7 @@ assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
 grad_accum_steps  = target_batch_size // (micro_batch_size * ddp_world_size)
 
 max_steps     = 1_195_000          # 381k current + 814k new = +10B tokens
-save_every    = 1000
+save_every    = 3000
 bridge_warmup = 500                # smooths data-distribution shift
 eta_min       = 1e-5
 
