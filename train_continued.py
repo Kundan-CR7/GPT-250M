@@ -90,13 +90,16 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, betas=(0.9, 0.95))
 scaler    = torch.amp.GradScaler('cuda')
 
 # =========================================================
-# CHECKPOINT LOADING
+# CHECKPOINT LOADING (Smart Resume Logic)
 # =========================================================
 if master_process:
     os.makedirs(WORKING_CKPT_DIR, exist_ok=True)
 
 working_ckpt = os.path.join(WORKING_CKPT_DIR, "latest_step_model.pth")
-load_path = working_ckpt if os.path.exists(working_ckpt) else (
+
+# Determine if we are starting fresh from the 381k model or resuming an active run
+is_continuation_session = os.path.exists(working_ckpt)
+load_path = working_ckpt if is_continuation_session else (
     OLD_CHECKPOINT if os.path.exists(OLD_CHECKPOINT) else None)
 
 start_step = 0
@@ -112,30 +115,54 @@ optimizer.load_state_dict(ckpt["optimizer_state_dict"])
 scaler.load_state_dict(ckpt["scaler_state_dict"])
 start_step = ckpt["step"] + 1
 best_loss  = ckpt["best_loss"]
-# Note: intentionally NOT loading old scheduler state.
+
+# Fix: Reset LR ONLY if it's the very first session
+if not is_continuation_session:
+    peak_lr = 5e-4
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = peak_lr
+        param_group['initial_lr'] = peak_lr
+    if master_process:
+        print("Session 1 detected: Resetting decayed LR to peak for new schedule.")
+else:
+    if master_process:
+        print("Continuation Session detected: Keeping optimizer LR state.")
+
+# Note: Deleting ckpt now, will load scheduler state later if needed
+# Need to keep a copy of scheduler state dict if it exists before deleting
+scheduler_state = ckpt.get("scheduler_state_dict", None)
 
 del ckpt; gc.collect(); torch.cuda.empty_cache()
 
 if master_process:
     cur_lr = optimizer.param_groups[0]["lr"]
-    print(f"Resumed at step {start_step} | current LR {cur_lr:.2e} | best_loss {best_loss:.4f}")
+    print(f"Resumed at step {start_step} | current LR {cur_lr:.4e} | best_loss {best_loss:.4f}")
 
 # =========================================================
-# FRESH SCHEDULER — new horizon, bridge warmup + cosine
+# FRESH SCHEDULER — Corrected for Grad Accumulation
 # =========================================================
-remaining_steps = max(max_steps - start_step, bridge_warmup + 100)
+actual_total_steps = (max_steps - start_step) // grad_accum_steps
+actual_warmup_steps = bridge_warmup // grad_accum_steps
+remaining_steps = max(actual_total_steps, actual_warmup_steps + 100)
+
 warmup_sched = LinearLR(optimizer, start_factor=0.3, end_factor=1.0,
-                        total_iters=bridge_warmup)
+                        total_iters=actual_warmup_steps)
 cosine_sched = CosineAnnealingLR(optimizer,
-                                 T_max=remaining_steps - bridge_warmup,
+                                 T_max=remaining_steps - actual_warmup_steps,
                                  eta_min=eta_min)
 scheduler = SequentialLR(optimizer,
                          schedulers=[warmup_sched, cosine_sched],
-                         milestones=[bridge_warmup])
+                         milestones=[actual_warmup_steps])
 
-if master_process:
-    print(f"New schedule: {bridge_warmup}-step bridge warmup, "
-          f"then cosine over {remaining_steps - bridge_warmup} steps to eta_min={eta_min}")
+# Fix: Reload scheduler state for Sessions 2-12
+if is_continuation_session and scheduler_state is not None:
+    scheduler.load_state_dict(scheduler_state)
+    if master_process:
+        print("Successfully loaded scheduler state. Resuming decay curve.")
+else:
+    if master_process:
+        print(f"New schedule: {actual_warmup_steps}-step bridge warmup, "
+              f"then cosine over {remaining_steps - actual_warmup_steps} steps to eta_min={eta_min}")
 
 # =========================================================
 # DDP WRAP
@@ -221,7 +248,7 @@ for step in range(start_step, max_steps):
             toks = 10 * micro_batch_size * ddp_world_size * config.block_size
             lr_now = optimizer.param_groups[0]["lr"]
             print(f"step {step:7d} | loss {real_loss:.4f} | "
-                  f"lr {lr_now:.2e} | {toks/dt:,.0f} tok/s")
+                  f"lr {lr_now:.4e} | {toks/dt:,.0f} tok/s")
             t0 = time.time()
 
         if sync_now:
