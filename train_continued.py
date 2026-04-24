@@ -1,9 +1,3 @@
-"""
-Continued pretraining on fineweb-edu starting from the existing 381k-step checkpoint.
-Targets +10B tokens (~814k extra steps) → new max_steps = 1,195,000.
-Keeps existing weights, optimizer momentum, and scaler state.
-Builds a fresh LR schedule: 500-step bridge warmup + cosine to 1e-5 over the new horizon.
-"""
 import os, time, gc
 import numpy as np
 import torch
@@ -18,9 +12,9 @@ from config import GPTConfig
 from model import GPT
 
 # =========================================================
-# PATHS — EDIT THESE
+# PATHS
 # =========================================================
-FINEWEB_PATH      = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"    # <-- edit
+FINEWEB_PATH      = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/train.bin"
 OLD_CHECKPOINT    = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_step_model.pth"
 WORKING_CKPT_DIR  = "/kaggle/working/checkpoints"
 
@@ -42,6 +36,8 @@ else:
     master_process = True
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+device_type = "cuda" if "cuda" in device else "cpu"
+
 if master_process:
     print(f"Device: {device} | GPUs: {ddp_world_size}")
 
@@ -51,28 +47,30 @@ if master_process:
 config = GPTConfig()
 target_batch_size = 36
 micro_batch_size  = 6
+
 assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
 grad_accum_steps  = target_batch_size // (micro_batch_size * ddp_world_size)
 
-max_steps     = 1_195_000          # 381k current + 814k new = +10B tokens
+max_steps     = 1_195_000
 save_every    = 3000
-bridge_warmup = 500                # smooths data-distribution shift
+bridge_warmup = 500
 eta_min       = 1e-5
 
 # =========================================================
-# DATASET — memmap reader for a single train.bin
+# DATASET
 # =========================================================
 class BinDataset(Dataset):
     def __init__(self, bin_path, block_size):
         self.data = np.memmap(bin_path, dtype=np.uint16, mode="r")
         self.block_size = block_size
         if master_process:
-            print(f"Loaded {bin_path}: {len(self.data):,} tokens "
-                  f"({len(self.data)*2/1e9:.2f} GB)")
+            print(f"Loaded dataset: {len(self.data):,} tokens")
+
     def __len__(self):
         return (len(self.data) - 1) // self.block_size
+
     def __getitem__(self, idx):
-        start = np.random.randint(0, len(self.data) - self.block_size - 1)
+        start = (idx * 9973) % (len(self.data) - self.block_size - 1)
         chunk = self.data[start : start + self.block_size + 1].astype(np.int64)
         return torch.from_numpy(chunk[:-1]), torch.from_numpy(chunk[1:])
 
@@ -84,85 +82,79 @@ train_dataset = BinDataset(FINEWEB_PATH, config.block_size)
 model = GPT(config).to(device)
 
 # =========================================================
-# OPTIMIZER + SCALER (built before loading checkpoint)
+# OPTIMIZER + SCALER
 # =========================================================
 optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, betas=(0.9, 0.95))
-scaler    = torch.amp.GradScaler('cuda')
+scaler    = torch.amp.GradScaler(enabled=(device_type == "cuda"))
 
 # =========================================================
-# CHECKPOINT LOADING (Smart Resume Logic)
+# CHECKPOINT LOADING
 # =========================================================
-if master_process:
-    os.makedirs(WORKING_CKPT_DIR, exist_ok=True)
-
+os.makedirs(WORKING_CKPT_DIR, exist_ok=True)
 working_ckpt = os.path.join(WORKING_CKPT_DIR, "latest_step_model.pth")
 
-# Determine if we are starting fresh from the 381k model or resuming an active run
-is_continuation_session = os.path.exists(working_ckpt)
-load_path = working_ckpt if is_continuation_session else (
-    OLD_CHECKPOINT if os.path.exists(OLD_CHECKPOINT) else None)
+load_path = None
+if os.path.exists(working_ckpt):
+    load_path = working_ckpt
+elif os.path.exists(OLD_CHECKPOINT):
+    load_path = OLD_CHECKPOINT
 
-start_step = 0
-best_loss  = float('inf')
+assert load_path is not None, "No checkpoint found."
 
-assert load_path, "No checkpoint to resume from."
 if master_process:
     print(f"Loading checkpoint: {load_path}")
 
 ckpt = torch.load(load_path, map_location="cpu")
+
 model.load_state_dict(ckpt["model_state_dict"])
 optimizer.load_state_dict(ckpt["optimizer_state_dict"])
 scaler.load_state_dict(ckpt["scaler_state_dict"])
+
 start_step = ckpt["step"] + 1
-best_loss  = ckpt["best_loss"]
-
-# Fix: Reset LR ONLY if it's the very first session
-if not is_continuation_session:
-    peak_lr = 5e-4
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = peak_lr
-        param_group['initial_lr'] = peak_lr
-    if master_process:
-        print("Session 1 detected: Resetting decayed LR to peak for new schedule.")
-else:
-    if master_process:
-        print("Continuation Session detected: Keeping optimizer LR state.")
-
-# Note: Deleting ckpt now, will load scheduler state later if needed
-# Need to keep a copy of scheduler state dict if it exists before deleting
+best_loss  = ckpt.get("best_loss", float("inf"))
 scheduler_state = ckpt.get("scheduler_state_dict", None)
 
 del ckpt; gc.collect(); torch.cuda.empty_cache()
 
 if master_process:
-    cur_lr = optimizer.param_groups[0]["lr"]
-    print(f"Resumed at step {start_step} | current LR {cur_lr:.4e} | best_loss {best_loss:.4f}")
+    print(f"Resumed at step {start_step} | LR {optimizer.param_groups[0]['lr']:.4e}")
 
 # =========================================================
-# FRESH SCHEDULER — Corrected for Grad Accumulation
+# SCHEDULER (CORRECTED)
 # =========================================================
-actual_total_steps = (max_steps - start_step) // grad_accum_steps
-actual_warmup_steps = bridge_warmup // grad_accum_steps
-remaining_steps = max(actual_total_steps, actual_warmup_steps + 100)
+actual_total_steps = max(1, (max_steps - start_step) // grad_accum_steps)
+actual_warmup_steps = max(1, bridge_warmup // grad_accum_steps)
 
-warmup_sched = LinearLR(optimizer, start_factor=0.3, end_factor=1.0,
-                        total_iters=actual_warmup_steps)
-cosine_sched = CosineAnnealingLR(optimizer,
-                                 T_max=remaining_steps - actual_warmup_steps,
-                                 eta_min=eta_min)
-scheduler = SequentialLR(optimizer,
-                         schedulers=[warmup_sched, cosine_sched],
-                         milestones=[actual_warmup_steps])
+warmup_sched = LinearLR(
+    optimizer,
+    start_factor=0.3,
+    end_factor=1.0,
+    total_iters=actual_warmup_steps
+)
 
-# Fix: Reload scheduler state for Sessions 2-12
-if is_continuation_session and scheduler_state is not None:
-    scheduler.load_state_dict(scheduler_state)
-    if master_process:
-        print("Successfully loaded scheduler state. Resuming decay curve.")
+cosine_sched = CosineAnnealingLR(
+    optimizer,
+    T_max=actual_total_steps - actual_warmup_steps,
+    eta_min=eta_min
+)
+
+scheduler = SequentialLR(
+    optimizer,
+    schedulers=[warmup_sched, cosine_sched],
+    milestones=[actual_warmup_steps]
+)
+
+if scheduler_state is not None:
+    try:
+        scheduler.load_state_dict(scheduler_state)
+        if master_process:
+            print("Scheduler restored ✅")
+    except:
+        if master_process:
+            print("WARNING: Scheduler mismatch — starting fresh schedule")
 else:
     if master_process:
-        print(f"New schedule: {actual_warmup_steps}-step bridge warmup, "
-              f"then cosine over {remaining_steps - actual_warmup_steps} steps to eta_min={eta_min}")
+        print("No scheduler state found — starting fresh schedule")
 
 # =========================================================
 # DDP WRAP
@@ -172,105 +164,90 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # =========================================================
-# SAMPLING HELPER
-# =========================================================
-@torch.no_grad()
-def generate_sample(m, dev, prompt="Tell me something about AI", max_new=70):
-    m.eval()
-    enc = tiktoken.get_encoding("gpt2")
-    x = torch.tensor(enc.encode(prompt), dtype=torch.long, device=dev).unsqueeze(0)
-    print(f"\n--- Brain check ---\nPrompt: {prompt}")
-    with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
-        for _ in range(max_new):
-            x_cond = x[:, -config.block_size:]
-            logits = m(x_cond)[:, -1, :]
-            probs = F.softmax(logits / 0.8, dim=-1)
-            nxt = torch.multinomial(probs, 1)
-            x = torch.cat((x, nxt), dim=1)
-    print(f"Output: {enc.decode(x[0].tolist())}\n-------------------\n")
-    m.train()
-    gc.collect(); torch.cuda.empty_cache()
-
-# =========================================================
 # BATCH GENERATOR
 # =========================================================
-def batch_gen(dataset, micro_bs, rank, start_step, seed=42):
-    g = torch.Generator(); g.manual_seed(seed + rank + start_step)
+def batch_gen(dataset, micro_bs):
     N = len(dataset)
     while True:
-        idxs = torch.randint(0, N, (micro_bs,), generator=g).tolist()
-        xs, ys = [], []
-        for i in idxs:
-            x, y = dataset[i]; xs.append(x); ys.append(y)
+        idxs = torch.randint(0, N, (micro_bs,))
+        xs, ys = zip(*[dataset[i.item()] for i in idxs])
         yield torch.stack(xs), torch.stack(ys)
 
-train_iter = batch_gen(train_dataset, micro_batch_size, ddp_rank, start_step)
+train_iter = batch_gen(train_dataset, micro_batch_size)
 
 # =========================================================
 # TRAIN LOOP
 # =========================================================
 model.train()
 optimizer.zero_grad(set_to_none=True)
-t0 = time.time()
 
-if master_process:
-    print(f"Training from step {start_step} to {max_steps} "
-          f"(+{max_steps - start_step:,} steps ≈ "
-          f"{(max_steps - start_step) * micro_batch_size * ddp_world_size * config.block_size / 1e9:.2f}B tokens)")
+opt_step = 0
+t0 = time.time()
 
 for step in range(start_step, max_steps):
     x, y = next(train_iter)
-    x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+    x, y = x.to(device), y.to(device)
 
     sync_now = (step + 1) % grad_accum_steps == 0
-    if ddp: model.require_backward_grad_sync = sync_now
+    if ddp:
+        model.require_backward_grad_sync = sync_now
 
-    with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+    with torch.amp.autocast(
+        device_type=device_type,
+        dtype=torch.float16 if device_type == "cuda" else torch.float32
+    ):
         logits = model(x)
         B, T, C = logits.shape
-        loss = F.cross_entropy(logits.view(B * T, C), y.view(B * T))
+        loss = F.cross_entropy(logits.view(B*T, C), y.view(B*T))
         loss = loss / grad_accum_steps
+
     scaler.scale(loss).backward()
 
     if sync_now:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+
         scheduler.step()
+        opt_step += 1
 
     if master_process:
         real_loss = loss.item() * grad_accum_steps
 
-        if step % 10 == 0 and step > start_step:
+        if step % 10 == 0:
             dt = time.time() - t0
             toks = 10 * micro_batch_size * ddp_world_size * config.block_size
-            lr_now = optimizer.param_groups[0]["lr"]
-            print(f"step {step:7d} | loss {real_loss:.4f} | "
-                  f"lr {lr_now:.4e} | {toks/dt:,.0f} tok/s")
+            lr = optimizer.param_groups[0]["lr"]
+
+            print(f"step {step} | loss {real_loss:.4f} | lr {lr:.4e} | {toks/dt:,.0f} tok/s")
             t0 = time.time()
 
         if sync_now:
-            ck = {
+            ckpt = {
                 "step": step,
-                "model_state_dict":     raw_model.state_dict(),
+                "model_state_dict": raw_model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "scaler_state_dict":    scaler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_loss": best_loss,
             }
-            if step >= 400 and real_loss < best_loss and real_loss < 4.5:
-                best_loss = real_loss
-                ck["best_loss"] = best_loss
-                torch.save(ck, os.path.join(WORKING_CKPT_DIR, "best_model.pth"))
-                print(f"New best loss {best_loss:.4f}")
-            if (step + 1) % save_every == 0:
-                torch.save(ck, os.path.join(WORKING_CKPT_DIR, "latest_step_model.pth"))
-                print(f"Saved latest checkpoint at step {step}")
-                generate_sample(raw_model, device)
 
+            if real_loss < best_loss:
+                best_loss = real_loss
+                torch.save(ckpt, os.path.join(WORKING_CKPT_DIR, "best_model.pth"))
+
+            if (step + 1) % save_every == 0:
+                torch.save(ckpt, os.path.join(WORKING_CKPT_DIR, "latest_step_model.pth"))
+                print(f"Checkpoint saved at step {step}")
+
+# =========================================================
+# CLEANUP
+# =========================================================
 if ddp:
     dist.destroy_process_group()
+
 if master_process:
-    print("Run complete.")
+    print("Training complete.")
