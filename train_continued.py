@@ -1,3 +1,16 @@
+# =========================================================
+# FULL CORRECTED GPT TRAINING SCRIPT (KAGGLE / DDP SAFE)
+# =========================================================
+# Fixes Included:
+# 1. Smart LR Resume (checks 'opt_step' to avoid resetting intermediate checkpoints)
+# 2. Perfect Cosine Math (scales curve to 814k phase steps, not absolute max_steps)
+# 3. Always same scheduler architecture (SequentialLR) for state dict safety
+# 4. Saves opt_step separately
+# 5. DDP-safe unique random streams
+# 6. Correct grad accumulation loss logging
+# 7. Safe reshape()
+# =========================================================
+
 import os, time, gc
 import numpy as np
 import torch
@@ -53,9 +66,11 @@ micro_batch_size  = 6
 
 base_lr       = 5e-4
 eta_min       = 1e-5
-max_steps     = 1_195_000
 save_every    = 3000
 bridge_warmup = 500
+
+max_steps   = 1_195_000  # Total life of the model (381k + 814k)
+phase_steps = 814_000    # Length of THIS specific training phase
 
 assert target_batch_size % (micro_batch_size * ddp_world_size) == 0
 grad_accum_steps = target_batch_size // (micro_batch_size * ddp_world_size)
@@ -102,15 +117,13 @@ optimizer = torch.optim.AdamW(
 scaler = torch.amp.GradScaler(enabled=(device_type == "cuda"))
 
 # =========================================================
-# CHECKPOINT LOAD
+# SMART CHECKPOINT LOAD
 # =========================================================
 os.makedirs(WORKING_CKPT_DIR, exist_ok=True)
 working_ckpt = os.path.join(WORKING_CKPT_DIR, "latest_step_model.pth")
 
-is_continuation = os.path.exists(working_ckpt)
-
 load_path = (
-    working_ckpt if is_continuation
+    working_ckpt if os.path.exists(working_ckpt)
     else OLD_CHECKPOINT if os.path.exists(OLD_CHECKPOINT)
     else None
 )
@@ -134,22 +147,24 @@ if load_path is not None:
         scaler.load_state_dict(ckpt["scaler_state_dict"])
 
     start_step = ckpt.get("step", -1) + 1
-    opt_step   = ckpt.get("opt_step", start_step // grad_accum_steps)
-
     best_loss = ckpt.get("best_loss", float("inf"))
-    scheduler_state = ckpt.get("scheduler_state_dict", None)
 
-    # NEW SESSION from old pretrained checkpoint
-    if not is_continuation:
+    # --- THE MAGIC FIX ---
+    # If "opt_step" is missing, this is the old 381k base model. Reset LR.
+    if "opt_step" not in ckpt:
+        opt_step = 0
+        scheduler_state = None
         for pg in optimizer.param_groups:
             pg["lr"] = base_lr
             pg["initial_lr"] = base_lr
-
-        scheduler_state = None
-        opt_step = 0
-
         if master_process:
-            print("Fresh session detected -> LR reset to 5e-4")
+            print("Base 381k checkpoint detected -> LR reset to 5e-4 for new phase")
+    else:
+        # If "opt_step" exists, this checkpoint was saved by THIS script. Resume LR.
+        opt_step = ckpt["opt_step"]
+        scheduler_state = ckpt.get("scheduler_state_dict", None)
+        if master_process:
+            print(f"Intermediate checkpoint detected -> Resuming LR from opt_step {opt_step}")
 
     del ckpt
     gc.collect()
@@ -167,7 +182,8 @@ if master_process:
 # =========================================================
 # ALWAYS SAME SCHEDULER ARCHITECTURE
 # =========================================================
-total_updates  = max_steps // grad_accum_steps
+# FIX: T_max must be the length of THIS PHASE (814k steps)
+total_updates  = phase_steps // grad_accum_steps
 warmup_updates = max(1, bridge_warmup // grad_accum_steps)
 cosine_updates = max(1, total_updates - warmup_updates)
 
