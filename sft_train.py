@@ -110,21 +110,29 @@ class ChatSFTDataset(Dataset):
 
         full = prompt_ids + response_ids
 
-        if len(full) > self.block_size:
-            keep = self.block_size - len(prompt_ids)
-            full = prompt_ids + response_ids[:keep]
+        # ✅ HARD TRUNCATION (important)
+        full = full[:self.block_size]
 
-        plen = len(prompt_ids)
+        # ensure at least 2 tokens
+        if len(full) < 2:
+            full = full + [EOT]
 
-        x = torch.tensor(full[:-1])
-        y = torch.tensor(full[1:])
+        x = torch.tensor(full[:-1], dtype=torch.long)
+        y = torch.tensor(full[1:], dtype=torch.long)
 
-        y[:plen-1] = IGNORE_INDEX
+        # mask prompt
+        plen = min(len(prompt_ids), len(y))
+        y[:plen] = IGNORE_INDEX
 
-        pad = (self.block_size - 1) - len(x)
-        if pad > 0:
-            x = torch.cat([x, torch.full((pad,), EOT)])
-            y = torch.cat([y, torch.full((pad,), IGNORE_INDEX)])
+        # ✅ PAD STRICTLY
+        pad_len = self.block_size - len(x)
+        if pad_len > 0:
+            x = torch.cat([x, torch.full((pad_len,), EOT, dtype=torch.long)])
+            y = torch.cat([y, torch.full((pad_len,), IGNORE_INDEX, dtype=torch.long)])
+
+        # ✅ FINAL SAFETY (guarantee equal size)
+        x = x[:self.block_size]
+        y = y[:self.block_size]
 
         return x, y
 
