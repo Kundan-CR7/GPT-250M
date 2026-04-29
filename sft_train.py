@@ -149,6 +149,38 @@ def cleanup():
     dist.destroy_process_group()
 
 
+# ================== LOAD CHECKPOINT ==================
+def load_checkpoint(model, path, is_main):
+    if not os.path.exists(path):
+        return
+
+    try:
+        ckpt = torch.load(path, map_location="cpu")
+
+        if "model" in ckpt:
+            state = ckpt["model"]
+        elif "model_state_dict" in ckpt:
+            state = ckpt["model_state_dict"]
+        else:
+            state = ckpt
+
+        # remove DDP prefix if present
+        if any(k.startswith("module.") for k in state.keys()):
+            state = {k.replace("module.", ""): v for k, v in state.items()}
+
+        missing, unexpected = model.load_state_dict(state, strict=False)
+
+        if is_main:
+            print("✅ Checkpoint loaded")
+            print(f"Missing keys: {len(missing)}")
+            print(f"Unexpected keys: {len(unexpected)}")
+
+    except Exception as e:
+        if is_main:
+            print("⚠️ Checkpoint incompatible, training from scratch")
+            print("Error:", e)
+
+
 # ================== TRAIN ==================
 def train(rank, world):
     ddp = world > 1
@@ -163,15 +195,8 @@ def train(rank, world):
     # ===== MODEL =====
     model = GPT(GPTConfig()).to(device)
 
-    # ❌ REMOVED BROKEN LINE
-    # model.gradient_checkpointing_enable()
-
-    if os.path.exists(CHECKPOINT_PATH):
-        ckpt = torch.load(CHECKPOINT_PATH, map_location="cpu")
-        state = ckpt.get("model", ckpt)
-        model.load_state_dict(state)
-        if is_main:
-            print("Loaded checkpoint")
+    # ✅ FIXED LOADING
+    load_checkpoint(model, CHECKPOINT_PATH, is_main)
 
     if ddp:
         model = DDP(model, device_ids=[rank])
@@ -209,7 +234,6 @@ def train(rank, world):
 
     step = 0
 
-    # ===== TRAIN LOOP =====
     for epoch in range(EPOCHS):
         if sampler:
             sampler.set_epoch(epoch)
@@ -239,8 +263,6 @@ def train(rank, world):
                     g["lr"] = lr
 
                 scaler.unscale_(optimizer)
-
-                # ✅ FIXED HERE
                 torch.nn.utils.clip_grad_norm_(raw_model.parameters(), GRAD_CLIP)
 
                 scaler.step(optimizer)
@@ -252,38 +274,9 @@ def train(rank, world):
                 if is_main and step % 20 == 0:
                     print(f"Step {step} | Loss {(loss.item()*GRAD_ACCUM):.4f} | LR {lr:.2e}")
 
-                # ===== VALIDATION =====
-                if is_main and step % 200 == 0:
-                    model.eval()
-                    val_loss = 0
-
-                    with torch.no_grad():
-                        for vx, vy in val_loader:
-                            vx, vy = vx.to(device), vy.to(device)
-                            logits = model(vx)
-
-                            l = F.cross_entropy(
-                                logits.view(-1, logits.size(-1)),
-                                vy.view(-1),
-                                ignore_index=IGNORE_INDEX
-                            )
-                            val_loss += l.item()
-
-                    val_loss /= len(val_loader)
-                    print(f"Validation Loss: {val_loss:.4f}")
-                    model.train()
-
-                # ===== SAVE =====
-                if is_main and step % 500 == 0:
-                    torch.save({
-                        "model": raw_model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "step": step
-                    }, f"{OUTPUT_DIR}/ckpt_{step}.pth")
-
     if is_main:
         torch.save(raw_model.state_dict(), f"{OUTPUT_DIR}/sft_final.pth")
-        print("Training complete")
+        print("✅ Training complete")
 
     if ddp:
         cleanup()
