@@ -26,7 +26,7 @@ BLOCK_SIZE      = 1024
 
 EPOCHS          = 2
 MICRO_BATCH     = 4
-GRAD_ACCUM      = 4   # effective batch = 32
+GRAD_ACCUM      = 4
 
 LR              = 2e-5
 MIN_LR          = 2e-6
@@ -38,19 +38,16 @@ GRAD_CLIP       = 1.0
 NUM_ALPACA      = 30000
 NUM_OASST       = 20000
 
-REPLAY_PATH     = None   # set path for replay
-REPLAY_RATIO    = 0.1
-
 IGNORE_INDEX    = -100
 EOT             = 50256
 
-# ================== REPRODUCIBILITY ==================
+
+# ================== REPRO ==================
 def set_seed(seed):
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+
 
 # ================== DATASET ==================
 class ChatSFTDataset(Dataset):
@@ -68,7 +65,6 @@ class ChatSFTDataset(Dataset):
             out   = it["output"].strip()
 
             user = f"{instr}\n\n{inp}" if inp else instr
-
             if len(out.split()) < 3:
                 continue
 
@@ -107,11 +103,10 @@ class ChatSFTDataset(Dataset):
         user, assistant = self.samples[idx]
 
         prompt = f"### User:\n{user}\n\n### Assistant:\n"
-        response = assistant
-
         enc = self.enc
+
         prompt_ids = enc.encode(prompt)
-        response_ids = enc.encode(response) + [EOT]
+        response_ids = enc.encode(assistant) + [EOT]
 
         full = prompt_ids + response_ids
 
@@ -133,6 +128,7 @@ class ChatSFTDataset(Dataset):
 
         return x, y
 
+
 # ================== LR ==================
 def get_lr(step, total):
     if step < WARMUP_STEPS:
@@ -141,7 +137,8 @@ def get_lr(step, total):
     progress = (step - WARMUP_STEPS) / (total - WARMUP_STEPS)
     return MIN_LR + 0.5 * (LR - MIN_LR) * (1 + math.cos(math.pi * progress))
 
-# ================== SETUP ==================
+
+# ================== DDP ==================
 def setup(rank, world):
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = "12355"
@@ -150,6 +147,7 @@ def setup(rank, world):
 
 def cleanup():
     dist.destroy_process_group()
+
 
 # ================== TRAIN ==================
 def train(rank, world):
@@ -164,14 +162,16 @@ def train(rank, world):
 
     # ===== MODEL =====
     model = GPT(GPTConfig()).to(device)
-    model.gradient_checkpointing_enable()
+
+    # ❌ REMOVED BROKEN LINE
+    # model.gradient_checkpointing_enable()
 
     if os.path.exists(CHECKPOINT_PATH):
         ckpt = torch.load(CHECKPOINT_PATH, map_location="cpu")
         state = ckpt.get("model", ckpt)
         model.load_state_dict(state)
         if is_main:
-            print("Loaded base checkpoint")
+            print("Loaded checkpoint")
 
     if ddp:
         model = DDP(model, device_ids=[rank])
@@ -183,7 +183,6 @@ def train(rank, world):
 
     train_size = int(0.95 * len(dataset))
     val_size   = len(dataset) - train_size
-
     train_ds, val_ds = random_split(dataset, [train_size, val_size])
 
     sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank) if ddp else None
@@ -194,6 +193,7 @@ def train(rank, world):
         sampler=sampler,
         shuffle=(sampler is None),
         num_workers=2,
+        pin_memory=True,
         drop_last=True
     )
 
@@ -215,7 +215,8 @@ def train(rank, world):
             sampler.set_epoch(epoch)
 
         for i, (x, y) in enumerate(train_loader):
-            x, y = x.to(device), y.to(device)
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
 
             is_sync = (i + 1) % GRAD_ACCUM == 0
             ctx = nullcontext() if is_sync else model.no_sync()
@@ -223,6 +224,7 @@ def train(rank, world):
             with ctx:
                 with torch.cuda.amp.autocast():
                     logits = model(x)
+
                     loss = F.cross_entropy(
                         logits.view(-1, logits.size(-1)),
                         y.view(-1),
@@ -237,7 +239,9 @@ def train(rank, world):
                     g["lr"] = lr
 
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+
+                # ✅ FIXED HERE
+                torch.nn.utils.clip_grad_norm_(raw_model.parameters(), GRAD_CLIP)
 
                 scaler.step(optimizer)
                 scaler.update()
@@ -283,6 +287,7 @@ def train(rank, world):
 
     if ddp:
         cleanup()
+
 
 # ================== MAIN ==================
 if __name__ == "__main__":
