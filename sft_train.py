@@ -20,25 +20,24 @@ from config import GPTConfig
 from model import GPT
 
 # ================== CONFIG ==================
-CHECKPOINT_PATH = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/sft_final.pth"
+CHECKPOINT_PATH = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_model.pth"
 OUTPUT_DIR      = "/kaggle/working"
 BLOCK_SIZE      = 1024
 
-EPOCHS          = 1
+EPOCHS          = 2
 MICRO_BATCH     = 4
 GRAD_ACCUM      = 4
 
-# 🚨 CHANGED: Much lower LR to protect existing weights during micro-run
-LR              = 5e-6  
+# Normal LR for full Joint Training
+LR              = 2e-5  
 MIN_LR          = 5e-7
-# 🚨 CHANGED: Lower warmup steps because our dataset is small now
-WARMUP_STEPS    = 10   
+WARMUP_STEPS    = 150   
 
 WEIGHT_DECAY    = 0.1
 GRAD_CLIP       = 1.0
 
-NUM_ALPACA      = 1000
-NUM_OASST       = 1000
+NUM_ALPACA      = 30000
+NUM_OASST       = 20000
 
 IGNORE_INDEX    = -100
 EOT             = 50256
@@ -58,7 +57,7 @@ class ChatSFTDataset(Dataset):
         self.block_size = block_size
         self.samples = []
 
-        print("Loading Alpaca (Small subset for memory retention)...")
+        print("Loading Alpaca...")
         alpaca = load_dataset("yahma/alpaca-cleaned", split=f"train[:{NUM_ALPACA}]")
 
         for it in alpaca:
@@ -72,7 +71,7 @@ class ChatSFTDataset(Dataset):
 
             self.samples.append((user, out))
 
-        print("Loading OASST (Small subset for memory retention)...")
+        print("Loading OASST...")
         oasst = load_dataset("OpenAssistant/oasst1", split="train")
 
         prompts = {
@@ -96,29 +95,33 @@ class ChatSFTDataset(Dataset):
                 count += 1
 
         # ==========================================
-        # 🚨 ADDED: LOAD CUSTOM SHIVI IDENTITY DATA
+        # 🚨 CUSTOM SHIVI IDENTITY DATA W/ OVERSAMPLING
         # ==========================================
         print("Loading Custom Shivi Persona Data...")
         try:
-            # Load the JSONL file you generated in the previous step
-            shivi_data = load_dataset("json", data_files="/kaggle/input/datasets/kundan8918/gpt-250m-training-data/shivi_custom_data.jsonl", split="train")
+            # Path matches the CHECKPOINT_PATH directory
+            shivi_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/shivi_custom_data.jsonl"
+            shivi_data = load_dataset("json", data_files=shivi_path, split="train")
             
+            # Multiply the dataset so it isn't drowned out by the 50k general rows
+            OVERSAMPLE_MULTIPLIER = 15
             shivi_count = 0
-            for row in shivi_data:
-                u = row["prompt"].strip()
-                a = row["response"].strip()
-                self.samples.append((u, a))
-                shivi_count += 1
+            
+            for _ in range(OVERSAMPLE_MULTIPLIER):
+                for row in shivi_data:
+                    u = row["prompt"].strip()
+                    a = row["response"].strip()
+                    self.samples.append((u, a))
+                    shivi_count += 1
                 
-            print(f"✅ Successfully injected {shivi_count} Shivi persona samples!")
+            print(f"✅ Successfully injected {shivi_count} Shivi persona samples (Oversampled {OVERSAMPLE_MULTIPLIER}x)!")
             
         except Exception as e:
-            print("⚠️ Could not load custom Shivi data. Ensure 'shivi_custom_data.jsonl' is in /kaggle/working/")
-            print("Error details:", e)
+            print(f"⚠️ Could not load custom Shivi data. Error details: {e}")
         # ==========================================
 
         random.shuffle(self.samples)
-        print(f"Total samples combined: {len(self.samples)}")
+        print(f"Total mixed samples: {len(self.samples)}")
 
     def __len__(self):
         return len(self.samples)
