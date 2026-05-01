@@ -184,6 +184,8 @@ def cleanup():
 # ================== LOAD CHECKPOINT ==================
 def load_checkpoint(model, path, is_main):
     if not os.path.exists(path):
+        if is_main:
+            raise FileNotFoundError(f"🚨 CRITICAL ERROR: Could not find checkpoint at {path}! Stopping training so we don't start from scratch.")
         return
 
     try:
