@@ -20,7 +20,7 @@ from config import GPTConfig
 from model import GPT
 
 # ================== CONFIG ==================
-CHECKPOINT_PATH = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_model.pth"
+CHECKPOINT_PATH = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_step_model.pth"
 OUTPUT_DIR      = "/kaggle/working"
 BLOCK_SIZE      = 1024
 
