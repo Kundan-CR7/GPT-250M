@@ -101,7 +101,7 @@ class ChatSFTDataset(Dataset):
         print("Loading Custom Shivi Persona Data...")
         try:
             # Load the JSONL file you generated in the previous step
-            shivi_data = load_dataset("json", data_files="/kaggle/working/shivi_custom_data.jsonl", split="train")
+            shivi_data = load_dataset("json", data_files="/kaggle/input/datasets/kundan8918/gpt-250m-training-data/shivi_custom_data.jsonl", split="train")
             
             shivi_count = 0
             for row in shivi_data:
