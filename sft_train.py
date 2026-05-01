@@ -20,23 +20,25 @@ from config import GPTConfig
 from model import GPT
 
 # ================== CONFIG ==================
-CHECKPOINT_PATH = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_step_model.pth"
+CHECKPOINT_PATH = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/sft_final.pth"
 OUTPUT_DIR      = "/kaggle/working"
 BLOCK_SIZE      = 1024
 
-EPOCHS          = 2
+EPOCHS          = 1
 MICRO_BATCH     = 4
 GRAD_ACCUM      = 4
 
-LR              = 2e-5
-MIN_LR          = 2e-6
-WARMUP_STEPS    = 150
+# 🚨 CHANGED: Much lower LR to protect existing weights during micro-run
+LR              = 5e-6  
+MIN_LR          = 5e-7
+# 🚨 CHANGED: Lower warmup steps because our dataset is small now
+WARMUP_STEPS    = 10   
 
 WEIGHT_DECAY    = 0.1
 GRAD_CLIP       = 1.0
 
-NUM_ALPACA      = 30000
-NUM_OASST       = 20000
+NUM_ALPACA      = 1000
+NUM_OASST       = 1000
 
 IGNORE_INDEX    = -100
 EOT             = 50256
@@ -56,7 +58,7 @@ class ChatSFTDataset(Dataset):
         self.block_size = block_size
         self.samples = []
 
-        print("Loading Alpaca...")
+        print("Loading Alpaca (Small subset for memory retention)...")
         alpaca = load_dataset("yahma/alpaca-cleaned", split=f"train[:{NUM_ALPACA}]")
 
         for it in alpaca:
@@ -70,7 +72,7 @@ class ChatSFTDataset(Dataset):
 
             self.samples.append((user, out))
 
-        print("Loading OASST...")
+        print("Loading OASST (Small subset for memory retention)...")
         oasst = load_dataset("OpenAssistant/oasst1", split="train")
 
         prompts = {
@@ -93,8 +95,30 @@ class ChatSFTDataset(Dataset):
                 self.samples.append((u, a))
                 count += 1
 
+        # ==========================================
+        # 🚨 ADDED: LOAD CUSTOM SHIVI IDENTITY DATA
+        # ==========================================
+        print("Loading Custom Shivi Persona Data...")
+        try:
+            # Load the JSONL file you generated in the previous step
+            shivi_data = load_dataset("json", data_files="/kaggle/working/shivi_custom_data.jsonl", split="train")
+            
+            shivi_count = 0
+            for row in shivi_data:
+                u = row["prompt"].strip()
+                a = row["response"].strip()
+                self.samples.append((u, a))
+                shivi_count += 1
+                
+            print(f"✅ Successfully injected {shivi_count} Shivi persona samples!")
+            
+        except Exception as e:
+            print("⚠️ Could not load custom Shivi data. Ensure 'shivi_custom_data.jsonl' is in /kaggle/working/")
+            print("Error details:", e)
+        # ==========================================
+
         random.shuffle(self.samples)
-        print(f"Total samples: {len(self.samples)}")
+        print(f"Total samples combined: {len(self.samples)}")
 
     def __len__(self):
         return len(self.samples)
@@ -110,17 +134,15 @@ class ChatSFTDataset(Dataset):
 
         full = prompt_ids + response_ids
 
-        # ✅ HARD TRUNCATION (important)
+        # ✅ HARD TRUNCATION
         full = full[:self.block_size]
 
-        # ensure at least 2 tokens
         if len(full) < 2:
             full = full + [EOT]
 
         x = torch.tensor(full[:-1], dtype=torch.long)
         y = torch.tensor(full[1:], dtype=torch.long)
 
-        # mask prompt
         plen = min(len(prompt_ids), len(y))
         y[:plen] = IGNORE_INDEX
 
@@ -130,7 +152,6 @@ class ChatSFTDataset(Dataset):
             x = torch.cat([x, torch.full((pad_len,), EOT, dtype=torch.long)])
             y = torch.cat([y, torch.full((pad_len,), IGNORE_INDEX, dtype=torch.long)])
 
-        # ✅ FINAL SAFETY (guarantee equal size)
         x = x[:self.block_size]
         y = y[:self.block_size]
 
@@ -172,7 +193,6 @@ def load_checkpoint(model, path, is_main):
         else:
             state = ckpt
 
-        # remove DDP prefix if present
         if any(k.startswith("module.") for k in state.keys()):
             state = {k.replace("module.", ""): v for k, v in state.items()}
 
@@ -200,10 +220,8 @@ def train(rank, world):
 
     set_seed(1337 + rank)
 
-    # ===== MODEL =====
     model = GPT(GPTConfig()).to(device)
 
-    # ✅ FIXED LOADING
     load_checkpoint(model, CHECKPOINT_PATH, is_main)
 
     if ddp:
@@ -211,7 +229,6 @@ def train(rank, world):
 
     raw_model = model.module if ddp else model
 
-    # ===== DATA =====
     dataset = ChatSFTDataset(BLOCK_SIZE)
 
     train_size = int(0.95 * len(dataset))
