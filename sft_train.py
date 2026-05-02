@@ -5,6 +5,7 @@ Run: !python sft_train.py
 
 import os, math, random
 from contextlib import nullcontext
+import json 
 
 import torch
 import torch.nn.functional as F
@@ -49,8 +50,8 @@ def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-
 # ================== DATASET ==================
+
 # ================== DATASET ==================
 class ChatSFTDataset(Dataset):
     def __init__(self, block_size):
@@ -58,47 +59,27 @@ class ChatSFTDataset(Dataset):
         self.block_size = block_size
         self.samples = []
 
-        print("Loading NVIDIA Nemotron Data via Streaming (Zero Disk Space)...")
+        # 🚨 UPDATE THIS PATH to wherever Kaggle placed your uploaded JSON file!
+        data_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/final_shivi.json"
+        
+        print(f"Loading custom unified dataset from {data_path}...")
         try:
-            # 🚨 CHANGED: Added streaming=True so it doesn't download 100GB of files!
-            nvidia_data = load_dataset(
-                "nvidia/Nemotron-Cascade-2-SFT-Data", 
-                "chat", 
-                split="train",
-                streaming=True 
-            )
-            
-            loaded_count = 0
-            
-            for row in nvidia_data:
-                # 🚨 CHANGED: We manually stop the stream once we hit our target
-                if loaded_count >= NUM_NEMOTRON:
-                    break
-                    
-                messages = row["messages"]
+            with open(data_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
                 
-                user_text = ""
-                assistant_text = ""
+            for row in data:
+                u = row["user_prompt"]
+                a = row["assistant_response"]
+                self.samples.append((u, a))
                 
-                for msg in messages:
-                    if msg["role"] == "user":
-                        user_text = msg["content"].strip()
-                    elif msg["role"] == "assistant":
-                        assistant_text = msg["content"].strip()
-                        
-                        if user_text and assistant_text and len(assistant_text.split()) >= 3:
-                            self.samples.append((user_text, assistant_text))
-                            loaded_count += 1 # Count the successful pairs!
-                            
-                            user_text = ""
-                            assistant_text = ""
-                            
-            print(f"✅ Successfully streamed {len(self.samples)} turns from NVIDIA!")
+            print(f"✅ Successfully loaded {len(self.samples)} training samples!")
+            
         except Exception as e:
-            print(f"⚠️ Failed to load NVIDIA data: {e}")
+            print(f"⚠️ CRITICAL ERROR loading dataset: {e}")
 
+        # The data is already shuffled from our preparation script, 
+        # but a second shuffle never hurts in Deep Learning!
         random.shuffle(self.samples)
-        print(f"Total training samples: {len(self.samples)}")
 
     def __len__(self):
         return len(self.samples)
@@ -106,6 +87,7 @@ class ChatSFTDataset(Dataset):
     def __getitem__(self, idx):
         user, assistant = self.samples[idx]
 
+        # Wrap it in your custom formatting tags
         prompt = f"### User:\n{user}\n\n### Assistant:\n"
         enc = self.enc
 
@@ -113,6 +95,8 @@ class ChatSFTDataset(Dataset):
         response_ids = enc.encode(assistant) + [EOT]
 
         full = prompt_ids + response_ids
+
+        # ✅ HARD TRUNCATION
         full = full[:self.block_size]
 
         if len(full) < 2:
@@ -124,6 +108,7 @@ class ChatSFTDataset(Dataset):
         plen = min(len(prompt_ids), len(y))
         y[:plen] = IGNORE_INDEX
 
+        # ✅ PAD STRICTLY
         pad_len = self.block_size - len(x)
         if pad_len > 0:
             x = torch.cat([x, torch.full((pad_len,), EOT, dtype=torch.long)])
