@@ -20,7 +20,7 @@ from config import GPTConfig
 from model import GPT
 
 # ================== CONFIG ==================
-CHECKPOINT_PATH = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_step_model.pth"
+CHECKPOINT_PATH = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/latest_model.pth"
 OUTPUT_DIR      = "/kaggle/working"
 BLOCK_SIZE      = 1024
 
@@ -28,7 +28,7 @@ EPOCHS          = 2
 MICRO_BATCH     = 4
 GRAD_ACCUM      = 4
 
-# Normal LR for full Joint Training
+# Normal LR for full Fine-Tuning
 LR              = 2e-5  
 MIN_LR          = 5e-7
 WARMUP_STEPS    = 150   
@@ -36,8 +36,8 @@ WARMUP_STEPS    = 150
 WEIGHT_DECAY    = 0.1
 GRAD_CLIP       = 1.0
 
-NUM_ALPACA      = 30000
-NUM_OASST       = 20000
+# Using a safe slice of the massive NVIDIA dataset
+NUM_NEMOTRON    = 30000 
 
 IGNORE_INDEX    = -100
 EOT             = 50256
@@ -57,71 +57,41 @@ class ChatSFTDataset(Dataset):
         self.block_size = block_size
         self.samples = []
 
-        print("Loading Alpaca...")
-        alpaca = load_dataset("yahma/alpaca-cleaned", split=f"train[:{NUM_ALPACA}]")
-
-        for it in alpaca:
-            instr = it["instruction"].strip()
-            inp   = it["input"].strip()
-            out   = it["output"].strip()
-
-            user = f"{instr}\n\n{inp}" if inp else instr
-            if len(out.split()) < 3:
-                continue
-
-            self.samples.append((user, out))
-
-        print("Loading OASST...")
-        oasst = load_dataset("OpenAssistant/oasst1", split="train")
-
-        prompts = {
-            m["message_id"]: m for m in oasst
-            if m["role"] == "prompter" and m["lang"] == "en"
-        }
-
-        count = 0
-        for m in oasst:
-            if count >= NUM_OASST:
-                break
-
-            if m["role"] == "assistant" and m["lang"] == "en" and m["parent_id"] in prompts:
-                u = prompts[m["parent_id"]]["text"].strip()
-                a = m["text"].strip()
-
-                if len(a.split()) < 3:
-                    continue
-
-                self.samples.append((u, a))
-                count += 1
-
-        # ==========================================
-        # 🚨 CUSTOM SHIVI IDENTITY DATA W/ OVERSAMPLING
-        # ==========================================
-        print("Loading Custom Shivi Persona Data...")
+        print("Loading NVIDIA Nemotron Data...")
         try:
-            # Path matches the CHECKPOINT_PATH directory
-            shivi_path = "/kaggle/input/datasets/kundan8918/gpt-250m-training-data/shivi_custom_data.jsonl"
-            shivi_data = load_dataset("json", data_files=shivi_path, split="train")
+            # We request ONLY a small slice so Kaggle doesn't run out of disk space/memory
+            nvidia_data = load_dataset(
+                "nvidia/Nemotron-Cascade-2-SFT-Data", 
+                "chat", 
+                split=f"train[:{NUM_NEMOTRON}]"
+            )
             
-            # Multiply the dataset so it isn't drowned out by the 50k general rows
-            OVERSAMPLE_MULTIPLIER = 15
-            shivi_count = 0
-            
-            for _ in range(OVERSAMPLE_MULTIPLIER):
-                for row in shivi_data:
-                    u = row["prompt"].strip()
-                    a = row["response"].strip()
-                    self.samples.append((u, a))
-                    shivi_count += 1
+            for row in nvidia_data:
+                messages = row["messages"]
                 
-            print(f"✅ Successfully injected {shivi_count} Shivi persona samples (Oversampled {OVERSAMPLE_MULTIPLIER}x)!")
-            
+                user_text = ""
+                assistant_text = ""
+                
+                for msg in messages:
+                    # Ignore system prompts, focus only on the actual conversation
+                    if msg["role"] == "user":
+                        user_text = msg["content"].strip()
+                    elif msg["role"] == "assistant":
+                        assistant_text = msg["content"].strip()
+                        
+                        # Once we have both a user question and an assistant answer, save it!
+                        if user_text and assistant_text and len(assistant_text.split()) >= 3:
+                            self.samples.append((user_text, assistant_text))
+                            # Reset for the next turn in a multi-turn conversation
+                            user_text = ""
+                            assistant_text = ""
+                            
+            print(f"✅ Successfully loaded {len(self.samples)} turns from NVIDIA!")
         except Exception as e:
-            print(f"⚠️ Could not load custom Shivi data. Error details: {e}")
-        # ==========================================
+            print(f"⚠️ Failed to load NVIDIA data: {e}")
 
         random.shuffle(self.samples)
-        print(f"Total mixed samples: {len(self.samples)}")
+        print(f"Total training samples: {len(self.samples)}")
 
     def __len__(self):
         return len(self.samples)
