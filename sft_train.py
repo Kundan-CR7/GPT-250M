@@ -51,42 +51,49 @@ def set_seed(seed):
 
 
 # ================== DATASET ==================
+# ================== DATASET ==================
 class ChatSFTDataset(Dataset):
     def __init__(self, block_size):
         self.enc = tiktoken.get_encoding("gpt2")
         self.block_size = block_size
         self.samples = []
 
-        print("Loading NVIDIA Nemotron Data...")
+        print("Loading NVIDIA Nemotron Data via Streaming (Zero Disk Space)...")
         try:
-            # We request ONLY a small slice so Kaggle doesn't run out of disk space/memory
+            # 🚨 CHANGED: Added streaming=True so it doesn't download 100GB of files!
             nvidia_data = load_dataset(
                 "nvidia/Nemotron-Cascade-2-SFT-Data", 
                 "chat", 
-                split=f"train[:{NUM_NEMOTRON}]"
+                split="train",
+                streaming=True 
             )
             
+            loaded_count = 0
+            
             for row in nvidia_data:
+                # 🚨 CHANGED: We manually stop the stream once we hit our target
+                if loaded_count >= NUM_NEMOTRON:
+                    break
+                    
                 messages = row["messages"]
                 
                 user_text = ""
                 assistant_text = ""
                 
                 for msg in messages:
-                    # Ignore system prompts, focus only on the actual conversation
                     if msg["role"] == "user":
                         user_text = msg["content"].strip()
                     elif msg["role"] == "assistant":
                         assistant_text = msg["content"].strip()
                         
-                        # Once we have both a user question and an assistant answer, save it!
                         if user_text and assistant_text and len(assistant_text.split()) >= 3:
                             self.samples.append((user_text, assistant_text))
-                            # Reset for the next turn in a multi-turn conversation
+                            loaded_count += 1 # Count the successful pairs!
+                            
                             user_text = ""
                             assistant_text = ""
                             
-            print(f"✅ Successfully loaded {len(self.samples)} turns from NVIDIA!")
+            print(f"✅ Successfully streamed {len(self.samples)} turns from NVIDIA!")
         except Exception as e:
             print(f"⚠️ Failed to load NVIDIA data: {e}")
 
@@ -106,8 +113,6 @@ class ChatSFTDataset(Dataset):
         response_ids = enc.encode(assistant) + [EOT]
 
         full = prompt_ids + response_ids
-
-        # ✅ HARD TRUNCATION
         full = full[:self.block_size]
 
         if len(full) < 2:
@@ -119,7 +124,6 @@ class ChatSFTDataset(Dataset):
         plen = min(len(prompt_ids), len(y))
         y[:plen] = IGNORE_INDEX
 
-        # ✅ PAD STRICTLY
         pad_len = self.block_size - len(x)
         if pad_len > 0:
             x = torch.cat([x, torch.full((pad_len,), EOT, dtype=torch.long)])
